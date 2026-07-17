@@ -11,7 +11,12 @@ SCOPES = [
     'https://www.googleapis.com/auth/gmail.send',
 ]
 
-SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# The shipped prompts and email template are package data: the app cannot run
+# without them, so they travel inside the package and resolve from its own
+# location — which holds for a source checkout, a pip install, and a frozen
+# binary alike. Users override them from their config dir rather than editing
+# these, so nothing here needs to be writable.
+TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'template')
 DEFAULT_TEXT_MODELS = ['gemini-3.5-flash', 'gemini-3-flash-preview', 'gemini-2.5-flash']
 DEFAULT_TTS_MODELS = ['gemini-3.1-flash-tts-preview', 'gemini-2.5-flash-preview-tts']
 
@@ -31,10 +36,11 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True)
 class Config:
-    script_dir: str
+    template_dir: str
     app_config_dir: str
     app_state_dir: str
     app_cache_dir: str
+    app_data_dir: str
     gemini_api_keys: tuple[str, ...]
     reader_email: str
     dest_email: str
@@ -46,6 +52,9 @@ class Config:
     tts_models: list[str]
     tts_voice: str
     gemini_timeout_ms: int
+    segment_gap_seconds: float
+    bullet_gap_seconds: float
+    subject_prefix: str
 
 
 def _xdg_dir(env_name, default):
@@ -101,6 +110,19 @@ def _positive_int(name, default, errors):
     return value
 
 
+def _seconds(name, default, errors):
+    """A duration in seconds. Zero is allowed: it turns the gap off."""
+    raw = os.environ.get(name, str(default)).strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        errors.append(f'{name} must be a non-negative number, got {raw!r}')
+        return default
+    if value < 0:
+        errors.append(f'{name} must be a non-negative number, got {raw!r}')
+    return value
+
+
 def load_config():
     app_config_dir = os.environ.get(
         f'{APP_NAME.upper()}_CONFIG_DIR',
@@ -121,6 +143,13 @@ def load_config():
         f'{APP_NAME.upper()}_CACHE_DIR',
         os.path.join(_xdg_dir('XDG_CACHE_HOME', '.cache'), APP_NAME),
     )
+    # User-supplied assets the app plays back rather than settings it reads —
+    # currently the optional opening jingle — so they belong in the XDG data
+    # directory, not alongside the .env in the config directory.
+    app_data_dir = os.environ.get(
+        f'{APP_NAME.upper()}_DATA_DIR',
+        os.path.join(_xdg_dir('XDG_DATA_HOME', '.local/share'), APP_NAME),
+    )
 
     errors = []
     gemini_api_keys = _gemini_api_keys(errors)
@@ -133,6 +162,13 @@ def load_config():
     if not tts_voice:
         errors.append('TTS_VOICE must not be empty')
     gemini_timeout_ms = _positive_int('GEMINI_TIMEOUT_MS', 180000, errors)
+    # Silence between spoken segments inside one bullet, and the longer silence
+    # between one bullet and the next. Tune after listening.
+    segment_gap_seconds = _seconds('SEGMENT_GAP_SECONDS', 0.8, errors)
+    bullet_gap_seconds = _seconds('BULLET_GAP_SECONDS', 1.2, errors)
+    # Prepended to the source subject on the email we send back. Empty sends the
+    # subject through unchanged.
+    subject_prefix = os.environ.get('SUBJECT_PREFIX', '[译]').strip()
 
     credentials_path = os.environ.get(
         'GOOGLE_CREDENTIALS_PATH',
@@ -144,16 +180,17 @@ def load_config():
     if errors:
         raise ConfigError(errors, config_path)
 
-    # The config dir was already created above; state and cache are only needed
-    # once the config is valid and the run actually proceeds.
-    for directory in (app_state_dir, app_cache_dir):
+    # The config dir was already created above; the rest are only needed once
+    # the config is valid and the run actually proceeds.
+    for directory in (app_state_dir, app_cache_dir, app_data_dir):
         os.makedirs(directory, exist_ok=True)
 
     return Config(
-        script_dir=SCRIPT_DIR,
+        template_dir=TEMPLATE_DIR,
         app_config_dir=app_config_dir,
         app_state_dir=app_state_dir,
         app_cache_dir=app_cache_dir,
+        app_data_dir=app_data_dir,
         gemini_api_keys=gemini_api_keys,
         reader_email=reader_email,
         dest_email=dest_email,
@@ -165,4 +202,7 @@ def load_config():
         tts_models=tts_models,
         tts_voice=tts_voice,
         gemini_timeout_ms=gemini_timeout_ms,
+        segment_gap_seconds=segment_gap_seconds,
+        bullet_gap_seconds=bullet_gap_seconds,
+        subject_prefix=subject_prefix,
     )

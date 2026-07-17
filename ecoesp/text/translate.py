@@ -3,10 +3,14 @@
 import os
 
 from ..clients.gemini import _require_text, gemini_generate
+from ..storage.files import resolve_asset
 
 
 def load_prompt(cfg, name):
-    path = os.path.join(cfg.script_dir, 'template', 'prompts', name)
+    """A prompt, preferring the user's <config dir>/prompts/<name> override."""
+    path = resolve_asset(
+        os.path.join(cfg.app_config_dir, 'prompts', name),
+        os.path.join(cfg.template_dir, 'prompts', name))
     with open(path, encoding='utf-8') as f:
         return f.read()
 

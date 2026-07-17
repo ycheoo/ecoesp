@@ -289,7 +289,9 @@ def send_email(cfg, service, original_subject, html_content, plain_content, audi
     else:
         msg = alternative
 
-    msg['Subject'] = f'[译] {original_subject}'
+    subject = (f'{cfg.subject_prefix} {original_subject}'
+               if cfg.subject_prefix else original_subject)
+    msg['Subject'] = subject
     msg['From'] = cfg.reader_email
     msg['To'] = cfg.dest_email
 
@@ -300,4 +302,4 @@ def send_email(cfg, service, original_subject, html_content, plain_content, audi
                               mimetype='message/rfc822', resumable=True)
     service.users().messages().send(
         userId='me', body={}, media_body=media).execute(num_retries=5)
-    print(f'Sent: [译] {original_subject}')
+    print(f'Sent: {subject}')

@@ -81,9 +81,23 @@ It looks for a matching email from the last 24 hours, builds the translation, vo
 
 By default, if audio generation fails (for example the Gemini TTS free-tier quota runs out), the HTML and plain-text email is still sent without the MP3.
 
-## Optional: an opening jingle
+## Optional: make it yours
 
-Drop a raw PCM clip at `assets/opening.pcm` to play a personal intro before every recording. It is entirely optional — see [assets/README.md](assets/README.md) for the format and an `ffmpeg` one-liner. With no file there, recordings just start at the first bullet.
+Everything below is optional — the tool works out of the box without any of it.
+
+**An opening jingle.** Drop a clip at `~/.local/share/ecoesp/opening.pcm` to play a personal intro before every recording. It must be raw signed 16-bit little-endian PCM, 24kHz, mono — the format Gemini TTS returns — so convert yours with:
+
+```bash
+ffmpeg -i my-opening.mp3 -f s16le -ar 24000 -ac 1 ~/.local/share/ecoesp/opening.pcm
+```
+
+**The narration and translation prompts.** Drop a file at `~/.config/ecoesp/prompts/<name>.md` to replace any shipped prompt — `tts_original.md`, `tts_vocab.md`, `tts_translation.md`, `text_translation.md`, `text_vocab.md`. Only the ones you supply are overridden; the rest keep shipping defaults, so they still improve when you upgrade.
+
+> Keep the markdown headings the shipped `text_translation.md` produces (`## 一`, `#### 原文`, `#### 中文翻译`, `#### 生词注释`). The audio pipeline parses them to split each story, so a prompt that stops emitting them will break audio generation.
+
+**The email template.** Drop a file at `~/.config/ecoesp/email.html`; `{body}` is replaced with the rendered story.
+
+**Pacing and the subject line.** `SEGMENT_GAP_SECONDS`, `BULLET_GAP_SECONDS`, and `SUBJECT_PREFIX` in your `.env` — see `.env.example`.
 
 ## Optional: run it daily with systemd
 
@@ -127,7 +141,8 @@ The tool follows the XDG base-directory convention and never writes into the pro
 
 | Path | Contents |
 | --- | --- |
-| `~/.config/ecoesp/` | `.env`, `credentials.json` |
+| `~/.config/ecoesp/` | `.env`, `credentials.json`, and any prompt or email-template overrides |
+| `~/.local/share/ecoesp/` | Your own assets — currently `opening.pcm` |
 | `~/.local/state/ecoesp/` | OAuth token, list of already-delivered messages |
 | `~/.cache/ecoesp/` | Generated text and audio, grouped by Gmail message ID (auto-pruned after 7 days) |
 

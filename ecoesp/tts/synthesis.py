@@ -28,14 +28,15 @@ TTS_RPM = 3
 TTS_WINDOW_SECONDS = 61
 TTS_TRANSIENT_RETRIES = 3
 
-# Silence inserted between concatenated study segments so the readings, vocab,
-# and translation don't run into each other. 24kHz 16-bit mono PCM is 48000
-# bytes per second. Segments within one bullet get SEGMENT_GAP_SECONDS; a longer
-# BULLET_GAP_SECONDS separates one bullet from the next. Tune after listening.
-SEGMENT_GAP_SECONDS = 0.8
-BULLET_GAP_SECONDS = 1.2
-SEGMENT_SILENCE = b'\x00' * int(48000 * SEGMENT_GAP_SECONDS)
-BULLET_SILENCE = b'\x00' * int(48000 * BULLET_GAP_SECONDS)
+# Gemini TTS returns raw 16-bit 24kHz mono PCM, i.e. 24000 * 2 bytes per second.
+PCM_BYTES_PER_SECOND = 48000
+
+
+def _silence(seconds):
+    """Silent PCM of the given duration, to keep concatenated segments from
+    running into each other. The durations come from the config, since how much
+    of a pause reads as natural is a matter of taste."""
+    return b'\x00' * int(PCM_BYTES_PER_SECOND * seconds)
 
 
 def _tts_config(cfg):
@@ -63,15 +64,19 @@ def _encode_mp3(cfg, message_id, pcm):
 
 
 def load_opening_pcm(cfg):
-    """Read the optional preconverted 24kHz 16-bit mono opening PCM. The opening
-    jingle is a personal asset that is not shipped; if assets/opening.pcm is
-    absent the audio simply starts at the first bullet, so returning empty bytes
-    (rather than failing) lets the pipeline run out of the box without one."""
-    path = os.path.join(cfg.script_dir, 'assets', 'opening.pcm')
+    """Read the optional preconverted 24kHz 16-bit mono opening PCM.
+
+    Unlike the prompts and the email template there is no shipped default to fall
+    back to — the jingle is a personal file, so a user's own copy in the data
+    directory is the only source. With no file there the audio simply starts at
+    the first bullet, so returning empty bytes (rather than failing) lets the
+    pipeline run out of the box without one.
+    """
+    path = os.path.join(cfg.app_data_dir, 'opening.pcm')
     if not os.path.isfile(path):
-        print('No opening asset (assets/opening.pcm); starting at the first bullet.')
+        print('No opening asset; starting at the first bullet.')
         return b''
-    print('Using opening asset: assets/opening.pcm')
+    print(f'Using opening asset: {path}')
     with open(path, 'rb') as f:
         return f.read()
 
@@ -176,14 +181,16 @@ def synthesize_study_audio(cfg, client, message_id, scripts, opening_pcm=b'',
             if manifest:
                 manifest.record(f'bullet {index + 1} {part}', model, key, name)
 
+    segment_silence = _silence(cfg.segment_gap_seconds)
+    bullet_silence = _silence(cfg.bullet_gap_seconds)
     bullets = []
     for index in range(len(scripts)):
         original = clips[(index, 'original')]
         segments = [original, clips[(index, 'vocab')], original,
                     clips[(index, 'translation')], original]
         # Segments within one bullet get the shorter gap.
-        bullets.append(SEGMENT_SILENCE.join(segments))
+        bullets.append(segment_silence.join(segments))
     # The opening already ends with its own pause, so it leads straight in;
-    # consecutive bullets are separated by the longer BULLET_SILENCE.
-    pcm = bytes(opening_pcm) + BULLET_SILENCE.join(bullets)
+    # consecutive bullets are separated by the longer gap.
+    pcm = bytes(opening_pcm) + bullet_silence.join(bullets)
     return _encode_mp3(cfg, message_id, pcm)
