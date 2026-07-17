@@ -12,7 +12,7 @@ SCOPES = [
 ]
 
 SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_TEXT_MODELS = ['gemini-3.5-flash', 'gemini-2.5-flash']
+DEFAULT_TEXT_MODELS = ['gemini-3.5-flash', 'gemini-3-flash-preview', 'gemini-2.5-flash']
 DEFAULT_TTS_MODELS = ['gemini-3.1-flash-tts-preview', 'gemini-2.5-flash-preview-tts']
 
 # The app's runtime identity (XDG directory leaf and env-var prefix) follows the

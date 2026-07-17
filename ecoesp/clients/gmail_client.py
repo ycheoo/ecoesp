@@ -164,6 +164,95 @@ def html_to_text(html):
     return parser.text()
 
 
+class _PromoBulletFinder(HTMLParser):
+    """Locate Today's-Top-Stories promotional bullets so the caller can excise
+    them from the raw HTML before it is flattened to text.
+
+    Real news bullets lead with a bold run (``▸ <b>…</b> …``); the newsletter's
+    event/promo bullets instead italicise the whole line (``▸ <i>…</i>``). That
+    distinction is lost once the HTML is flattened, so this runs on the raw HTML
+    and records the character span of every ``<p>`` whose text, right after the
+    ▸ glyph, is led by an italic (``<i>``/``<em>``) run rather than bold. The
+    signal is the leading tag specifically — a ``<b>``-led bullet that merely
+    contains italics later (e.g. a book title) is left alone.
+    """
+
+    ITALIC_TAGS = {'i', 'em'}
+    GLYPH = '▸'  # ▸
+
+    def __init__(self, html):
+        super().__init__(convert_charrefs=True)
+        self._html = html
+        # Absolute offset of each line's start, matching HTMLParser's own
+        # newline-based line counting, so getpos() maps back to a string index.
+        self._line_starts = [0]
+        for i, char in enumerate(html):
+            if char == '\n':
+                self._line_starts.append(i + 1)
+        self.spans = []
+        self._reset()
+
+    def _reset(self):
+        self._p_start = None         # offset of the current <p>'s '<'
+        self._seen_glyph = False     # the ▸ has appeared in this <p>
+        self._awaiting_lead = False  # ▸ seen, still waiting for the lead run
+        self._is_promo = False
+
+    def _offset(self):
+        line, col = self.getpos()
+        return self._line_starts[line - 1] + col
+
+    def _tag_end(self):
+        """Offset just past the '>' of the tag currently being handled."""
+        return self._html.index('>', self._offset()) + 1
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'p':
+            self._reset()
+            self._p_start = self._offset()
+        elif self._awaiting_lead:
+            # The first inline element after the ▸ decides: italic => promo.
+            self._is_promo = tag in self.ITALIC_TAGS
+            self._awaiting_lead = False
+
+    def handle_data(self, data):
+        if self._p_start is None:
+            return
+        if not self._seen_glyph:
+            idx = data.find(self.GLYPH)
+            if idx == -1:
+                return
+            self._seen_glyph = True
+            # Non-whitespace text right after the ▸ (no tag) is a plain lead.
+            self._awaiting_lead = not data[idx + 1:].strip()
+        elif self._awaiting_lead and data.strip():
+            self._awaiting_lead = False
+
+    def handle_endtag(self, tag):
+        if tag == 'p' and self._p_start is not None:
+            if self._is_promo:
+                self.spans.append((self._p_start, self._tag_end()))
+            self._reset()
+
+
+def strip_promo_bullets(html):
+    """Remove Today's-Top-Stories promo bullets (see _PromoBulletFinder) from
+    the raw HTML before it is flattened to text.
+
+    Fails open: if no promo bullet is detected the HTML is returned unchanged,
+    so a change to the newsletter's markup can only let a promo slip through —
+    never drop a real story.
+    """
+    if not html:
+        return html
+    finder = _PromoBulletFinder(html)
+    finder.feed(html)
+    finder.close()
+    for start, end in sorted(finder.spans, reverse=True):
+        html = html[:start] + html[end:]
+    return html
+
+
 def get_email_content(service, message_id):
     msg = service.users().messages().get(userId='me', id=message_id, format='full').execute()
     subject = ''
@@ -176,7 +265,7 @@ def get_email_content(service, message_id):
             sender = header['value']
     html_body, plain_body = extract_body(msg['payload'])
     if html_body:
-        text = html_to_text(html_body)
+        text = html_to_text(strip_promo_bullets(html_body))
     elif plain_body:
         text = plain_body
     else:

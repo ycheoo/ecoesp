@@ -30,9 +30,12 @@ TTS_TRANSIENT_RETRIES = 3
 
 # Silence inserted between concatenated study segments so the readings, vocab,
 # and translation don't run into each other. 24kHz 16-bit mono PCM is 48000
-# bytes per second. Tune SEGMENT_GAP_SECONDS after listening.
-SEGMENT_GAP_SECONDS = 0.6
+# bytes per second. Segments within one bullet get SEGMENT_GAP_SECONDS; a longer
+# BULLET_GAP_SECONDS separates one bullet from the next. Tune after listening.
+SEGMENT_GAP_SECONDS = 0.8
+BULLET_GAP_SECONDS = 1.2
 SEGMENT_SILENCE = b'\x00' * int(48000 * SEGMENT_GAP_SECONDS)
+BULLET_SILENCE = b'\x00' * int(48000 * BULLET_GAP_SECONDS)
 
 
 def _tts_config(cfg):
@@ -173,12 +176,14 @@ def synthesize_study_audio(cfg, client, message_id, scripts, opening_pcm=b'',
             if manifest:
                 manifest.record(f'bullet {index + 1} {part}', model, key, name)
 
-    segments = []
+    bullets = []
     for index in range(len(scripts)):
         original = clips[(index, 'original')]
-        segments += [original, clips[(index, 'vocab')], original,
-                     clips[(index, 'translation')], original]
-    # The opening already ends with its own pause, so it leads straight in; the
-    # spoken segments get a silence gap between each other.
-    pcm = bytes(opening_pcm) + SEGMENT_SILENCE.join(segments)
+        segments = [original, clips[(index, 'vocab')], original,
+                    clips[(index, 'translation')], original]
+        # Segments within one bullet get the shorter gap.
+        bullets.append(SEGMENT_SILENCE.join(segments))
+    # The opening already ends with its own pause, so it leads straight in;
+    # consecutive bullets are separated by the longer BULLET_SILENCE.
+    pcm = bytes(opening_pcm) + BULLET_SILENCE.join(bullets)
     return _encode_mp3(cfg, message_id, pcm)
