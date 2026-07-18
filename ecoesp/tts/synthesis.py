@@ -3,6 +3,7 @@
 This module is the seam for swapping the TTS backend (currently Gemini TTS).
 """
 
+from array import array
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import subprocess
@@ -37,6 +38,52 @@ def _silence(seconds):
     running into each other. The durations come from the config, since how much
     of a pause reads as natural is a matter of taste."""
     return b'\x00' * int(PCM_BYTES_PER_SECOND * seconds)
+
+
+# Samples whose absolute value stays below this count as silence; measured
+# well above Gemini TTS's noise floor and well below any speech.
+SILENCE_AMPLITUDE = 300
+# The longest pause allowed to survive inside one synthesized clip. The
+# longest legitimate pause observed is ~2s, so 3s only catches pathologies.
+MAX_SILENCE_SECONDS = 3.0
+COMPRESSED_SILENCE_SECONDS = 1.0
+
+
+def _compress_long_silences(pcm):
+    """Cap pathological pauses inside one synthesized clip.
+
+    The TTS models render style instructions like "pause noticeably between
+    entries" unpredictably; one observed clip held 9-10 seconds of dead air
+    between vocabulary entries. Any run of near-silence longer than
+    MAX_SILENCE_SECONDS is cut down to COMPRESSED_SILENCE_SECONDS, while
+    legitimate pauses pass through untouched. Scans in 10ms windows; input
+    shorter than one window (or not sample-aligned at the tail) is passed
+    through as-is."""
+    hop = PCM_BYTES_PER_SECOND // 2 // 100  # samples per 10ms window
+    samples = array('h', pcm[:len(pcm) - (len(pcm) % 2)])
+    windows = len(samples) // hop
+    max_run = int(MAX_SILENCE_SECONDS * 100)
+    quiet = [
+        max(abs(s) for s in samples[i * hop:(i + 1) * hop]) < SILENCE_AMPLITUDE
+        for i in range(windows)
+    ]
+    pieces, kept_to, i = [], 0, 0
+    while i < windows:
+        if not quiet[i]:
+            i += 1
+            continue
+        j = i
+        while j < windows and quiet[j]:
+            j += 1
+        if j - i >= max_run:
+            pieces.append(pcm[kept_to:i * hop * 2])
+            pieces.append(_silence(COMPRESSED_SILENCE_SECONDS))
+            kept_to = j * hop * 2
+        i = j
+    if not pieces:
+        return pcm
+    pieces.append(pcm[kept_to:])
+    return b''.join(pieces)
 
 
 def _tts_config(cfg):
@@ -185,9 +232,12 @@ def synthesize_study_audio(cfg, client, message_id, scripts, opening_pcm=b'',
     bullet_silence = _silence(cfg.bullet_gap_seconds)
     bullets = []
     for index in range(len(scripts)):
-        original = clips[(index, 'original')]
-        segments = [original, clips[(index, 'vocab')], original,
-                    clips[(index, 'translation')], original]
+        # The cached per-segment PCMs stay as the model produced them; the
+        # pathological-pause compression applies only to what gets assembled.
+        original, vocab, translation = (
+            _compress_long_silences(clips[(index, part)])
+            for part in ('original', 'vocab', 'translation'))
+        segments = [original, vocab, original, translation, original]
         # Segments within one bullet get the shorter gap.
         bullets.append(segment_silence.join(segments))
     # The opening already ends with its own pause, so it leads straight in;
