@@ -1,0 +1,67 @@
+# Build the release binary and attach it to a GitHub Release.
+#
+# Maintained in the dev repository as packaging/release.yml, where it is
+# inert; publish.sh installs it at .github/workflows/release.yml in the
+# public repo (the only path GitHub Actions reads) and retargets the package
+# name like the other packaging files.
+#
+# Pushing a tag like v0.1.0 builds and publishes a Release. The manual Run
+# button (workflow_dispatch) only builds and uploads a short-lived workflow
+# artifact — for exercising changes without minting a tag.
+
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# Needed to create the Release; the token is injected by GitHub per run.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # Deliberately the oldest still-supported LTS: the binary only runs on a
+    # glibc at least as new as the build machine's, so building old maximises
+    # where it runs.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      # The tag is the version: stamp it into the package before freezing so
+      # the released binary answers --version with its tag. Dispatch test
+      # builds skip this and honestly report dev.
+      - name: Stamp the version for the tag
+        if: github.ref_type == 'tag'
+        run: sed -i "s/^__version__ = .*/__version__ = '${GITHUB_REF_NAME}'/" ecoesp/__init__.py
+
+      - name: Build the binary
+        run: packaging/build.sh
+
+      - name: Pack the release archive
+        if: github.ref_type == 'tag'
+        # The archive name carries the version and platform; the binary inside
+        # keeps its short name, which is what users type and point systemd at.
+        # tar also preserves the executable bit, which a raw binary download
+        # loses, so the unpacked file runs without a chmod.
+        run: |
+          tar czf "dist/ecoesp_${GITHUB_REF_NAME}_linux_amd64.tar.gz" -C dist ecoesp
+          rm dist/ecoesp
+
+      - name: Publish the Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+
+      - name: Upload the test build
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v5
+        with:
+          name: ecoesp-test-build
+          path: dist/ecoesp

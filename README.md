@@ -6,12 +6,35 @@ For each *Today's Top Stories* bullet the recording plays: English original → 
 
 ## What you need
 
-- Linux with Python 3.10+ and `ffmpeg`
+- Linux x86_64 for the prebuilt binary, or Linux with Python 3.10+ to run from source
+- `ffmpeg`
 - A Google account whose Gmail receives the Espresso newsletter
 - Gmail API OAuth credentials (Desktop app) — free
 - One or more [Gemini API keys](https://aistudio.google.com/apikey) — the free tier is enough to try it
 
-On Debian/Ubuntu:
+## Install
+
+### Prebuilt binary
+
+Download the archive for the latest version from
+[GitHub Releases](https://github.com/ycheoo/ecoesp/releases). For example, after
+downloading `ecoesp_v0.1.0_linux_amd64.tar.gz`:
+
+```bash
+sudo apt install ffmpeg
+tar xzf ecoesp_v0.1.0_linux_amd64.tar.gz
+install -Dm755 ecoesp ~/.local/bin/ecoesp
+~/.local/bin/ecoesp --version
+```
+
+Replace `v0.1.0` with the version you downloaded. The binary includes Python and
+the application's dependencies; `ffmpeg` remains a system dependency and must be
+available on `PATH`. Add `~/.local/bin` to `PATH` if your distribution does not
+already do so.
+
+### Run from source
+
+On Debian or Ubuntu:
 
 ```bash
 sudo apt install python3 python3-venv ffmpeg
@@ -38,14 +61,15 @@ The tool requests read-only + send access to Gmail. The first run opens a browse
 
 ## 2. Configuration
 
-Copy the template into place and edit it:
+Create the configuration file and restrict its permissions:
 
 ```bash
-cp .env.example ~/.config/ecoesp/.env
+mkdir -p ~/.config/ecoesp
+touch ~/.config/ecoesp/.env
 chmod 600 ~/.config/ecoesp/.env
 ```
 
-Set at least these values in `~/.config/ecoesp/.env`:
+Open `~/.config/ecoesp/.env` in an editor and set at least these values:
 
 ```dotenv
 # One or more Gemini API keys, comma-separated. More keys = more throughput and
@@ -62,9 +86,19 @@ DEST_EMAIL=you@gmail.com
 GMAIL_QUERY=from:noreply@e.economist.com subject:"world in brief"
 ```
 
-Everything else is optional and documented in `.env.example` (model choices, TTS voice, timeouts).
+Everything else is optional and documented in
+[`.env.example`](.env.example) (model choices, TTS voice, timeouts). In a source
+checkout, you can copy that file instead of creating an empty one.
 
 ## 3. Run
+
+For the prebuilt binary:
+
+```bash
+ecoesp
+```
+
+From a source checkout:
 
 ```bash
 .venv/bin/python -m ecoesp
@@ -78,6 +112,7 @@ It looks for a matching email from the last 24 hours, builds the translation, vo
 | `--require-audio` | Fail instead of sending a text-only email when audio generation fails |
 | `--prepare-only` | Build the translation and scripts but skip TTS and sending |
 | `--lookback-hours N` | Search the last `N` hours instead of 24 |
+| `--version` | Print the version (release binaries report their tag; source runs report `dev`) |
 
 By default, if audio generation fails (for example the Gemini TTS free-tier quota runs out), the HTML and plain-text email is still sent without the MP3.
 
@@ -109,9 +144,12 @@ Description=Translate the latest Economist Espresso email
 
 [Service]
 Type=oneshot
-WorkingDirectory=/absolute/path/to/ecoesp
-ExecStart=/absolute/path/to/ecoesp/.venv/bin/python -m ecoesp
+ExecStart=%h/.local/bin/ecoesp
 ```
+
+When running from source instead, add
+`WorkingDirectory=/absolute/path/to/ecoesp` and use
+`ExecStart=/absolute/path/to/ecoesp/.venv/bin/python -m ecoesp`.
 
 And `~/.config/systemd/user/ecoesp.timer`:
 
@@ -134,6 +172,16 @@ systemctl --user daemon-reload
 systemctl --user enable --now ecoesp.timer
 journalctl --user -u ecoesp.service -n 100   # inspect logs
 ```
+
+## Optional: build a single-file binary
+
+To compile everything (Python included, ffmpeg excluded) into one Linux executable:
+
+```bash
+packaging/build.sh
+```
+
+The result is `dist/ecoesp`; it reads the same configuration from the same places, so `ExecStart` in the systemd unit can point at it instead of the venv. The script builds inside its own temporary venv, so it won't touch your environment. A binary runs only on systems whose glibc is at least as new as the build machine's.
 
 ## Where things live
 

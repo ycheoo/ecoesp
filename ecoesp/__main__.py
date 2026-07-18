@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Economist Espresso Translator
-Reads today's Economist Espresso email, translates it with vocabulary annotations,
+Reads a matching Economist Espresso email, translates it with vocabulary annotations,
 synthesizes a bilingual audio version, and sends both back to the inbox.
 """
 
@@ -9,7 +9,8 @@ import argparse
 import os
 import sys
 
-from .config import ConfigError, load_config
+from . import __version__
+from .config import APP_NAME, ConfigError, load_config
 from .storage.delivery_state import mark_processed, was_processed
 from .clients.gemini import make_gemini_client
 from .clients.gmail_client import (
@@ -40,6 +41,8 @@ def _positive_int(value):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description='Process an Economist Espresso email.')
+    parser.add_argument(
+        '--version', action='version', version=f'{APP_NAME} {__version__}')
     parser.add_argument(
         '--force', action='store_true',
         help='Process the selected email even if it was already delivered.')
@@ -76,7 +79,9 @@ def main(argv=None):
     print('Authenticating with Gmail...')
     service = get_gmail_service(cfg)
 
-    print('Searching for today\'s Economist Espresso email...')
+    unit = 'hour' if args.lookback_hours == 1 else 'hours'
+    print(f'Searching for an Economist Espresso email within the last '
+          f'{args.lookback_hours} {unit}...')
     message = find_espresso_email(
         cfg, service, lookback_hours=args.lookback_hours)
     if not message:
