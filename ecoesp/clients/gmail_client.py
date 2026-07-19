@@ -4,6 +4,7 @@ body, and sending the translated result.
 
 import base64
 import io
+import logging
 import os
 import pickle
 import re
@@ -29,6 +30,9 @@ from googleapiclient.http import MediaIoBaseUpload
 
 from ..config import APP_NAME, SCOPES
 from ..storage.files import atomic_write
+
+
+logger = logging.getLogger(__name__)
 
 
 class GmailAuthenticationError(RuntimeError):
@@ -200,7 +204,8 @@ def get_gmail_credentials(cfg, interactive=False):
             # token is no better than no token: fall through and authorize
             # from scratch, or the very command the error message points at
             # would fail the same way forever.
-            print('The stored token could not be refreshed; authorizing again.')
+            logger.warning(
+                'The stored token could not be refreshed; authorizing again.')
             creds = None
     if not interactive:
         raise GmailAuthenticationError(
@@ -237,7 +242,7 @@ def find_espresso_email(cfg, service, lookback_hours=24):
     results = service.users().messages().list(userId='me', q=query, maxResults=5).execute()
     messages = results.get('messages', [])
     if messages:
-        print(f'Found {len(messages)} message(s)')
+        logger.debug('Found %s message(s)', len(messages))
         return messages[0]
     return None
 
@@ -482,4 +487,4 @@ def send_email(cfg, service, original_subject, html_content, plain_content, audi
                               mimetype='message/rfc822', resumable=True)
     service.users().messages().send(
         userId='me', body={}, media_body=media).execute(num_retries=5)
-    print(f'Sent: {subject}')
+    logger.info('Sent: %s', subject)

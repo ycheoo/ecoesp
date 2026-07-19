@@ -5,6 +5,7 @@ This module is the seam for swapping the TTS backend (currently Gemini TTS).
 
 from array import array
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
 import os
 import subprocess
 import time
@@ -16,6 +17,9 @@ from ..clients.gemini import (
     GeminiClientPool, _is_daily_quota_error, _is_quota_error,
     _is_tts_retryable_error, _require_audio, generate_once)
 from ..clients.scheduler import KeyScheduler
+
+
+logger = logging.getLogger(__name__)
 
 
 # Requests per minute allowed for one API key on one model. Worker concurrency
@@ -31,6 +35,7 @@ TTS_TRANSIENT_RETRIES = 3
 
 # Gemini TTS returns raw 16-bit 24kHz mono PCM, i.e. 24000 * 2 bytes per second.
 PCM_BYTES_PER_SECOND = 48000
+PROGRESS_WIDTH = 20
 
 
 def _silence(seconds):
@@ -38,6 +43,13 @@ def _silence(seconds):
     running into each other. The durations come from the config, since how much
     of a pause reads as natural is a matter of taste."""
     return b'\x00' * int(PCM_BYTES_PER_SECOND * seconds)
+
+
+def _bullet_progress(completed, total):
+    """A journal-friendly progress bar: one complete line per update."""
+    filled = completed * PROGRESS_WIDTH // total
+    bar = '#' * filled + '-' * (PROGRESS_WIDTH - filled)
+    return f'Bullet progress: [{bar}] {completed}/{total}'
 
 
 # Samples whose absolute value stays below this count as silence; measured
@@ -121,9 +133,9 @@ def load_opening_pcm(cfg):
     """
     path = os.path.join(cfg.app_data_dir, 'opening.pcm')
     if not os.path.isfile(path):
-        print('No opening asset; starting at the first bullet.')
+        logger.debug('No opening asset; starting at the first bullet.')
         return b''
-    print(f'Using opening asset: {path}')
+    logger.debug('Using opening asset: %s', path)
     with open(path, 'rb') as f:
         return f.read()
 
@@ -139,33 +151,41 @@ def _synthesize_segment(scheduler, label, content, config):
     payload retries up to three times with 2/4/8-second backoff, acquiring
     scheduler budget again before every request; anything else fails the segment.
     Returns the PCM plus the model and API-key label that produced it."""
-    print(f'Synthesizing {label}...')
+    logger.debug('Synthesizing %s...', label)
     transient_retries = 0
     while True:
         index, sdk_client, key_label, model = scheduler.acquire()
         try:
             data = generate_once(
                 sdk_client, model, content, config, extract=_require_audio)
-            print(f'{label} ready with {model} on {key_label}.')
+            logger.debug('%s ready with %s on %s.', label, model, key_label)
             return data, model, key_label
         except Exception as e:
             if _is_quota_error(e):
                 if _is_daily_quota_error(e):
-                    print(f'{label}: {key_label} exhausted {model} for the day; '
-                          'downgrading.')
-                    scheduler.mark_exhausted(index, model)
+                    first_report = scheduler.mark_exhausted(index, model)
+                    if first_report:
+                        logger.warning(
+                            '%s exhausted %s for the day.', key_label, model)
+                    else:
+                        logger.debug(
+                            '%s: %s also returned daily quota exhaustion for '
+                            '%s; already marked exhausted.',
+                            label, key_label, model)
                 else:
-                    print(f'{label}: {key_label} hit {model} rate limit; '
-                          'retrying elsewhere.')
+                    logger.warning(
+                        '%s: %s hit %s rate limit; retrying elsewhere.',
+                        label, key_label, model)
                     scheduler.penalize(index, model)
                 continue
             if (_is_tts_retryable_error(e)
                     and transient_retries < TTS_TRANSIENT_RETRIES):
                 delay = 2 ** (transient_retries + 1)
                 transient_retries += 1
-                print(f'{label}: transient error from {model} on {key_label}; '
-                      f'retry {transient_retries}/'
-                      f'{TTS_TRANSIENT_RETRIES} in {delay}s: {e}')
+                logger.warning(
+                    '%s: transient error from %s on %s; retry %s/%s in %ss: %s',
+                    label, model, key_label, transient_retries,
+                    TTS_TRANSIENT_RETRIES, delay, e)
                 time.sleep(delay)
                 continue
             raise
@@ -206,6 +226,9 @@ def synthesize_study_audio(cfg, client, message_id, scripts, opening_pcm=b'',
     ]
 
     clips = {}
+    completed_parts = [0] * len(scripts)
+    completed_bullets = 0
+    logger.info(_bullet_progress(completed_bullets, len(scripts)))
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {}
         for index, part, content in tasks:
@@ -227,6 +250,11 @@ def synthesize_study_audio(cfg, client, message_id, scripts, opening_pcm=b'',
             atomic_write(path, data)
             if manifest:
                 manifest.record(f'bullet {index + 1} {part}', model, key, name)
+            completed_parts[index] += 1
+            if completed_parts[index] == 3:
+                completed_bullets += 1
+                logger.info(
+                    _bullet_progress(completed_bullets, len(scripts)))
 
     segment_silence = _silence(cfg.segment_gap_seconds)
     bullet_silence = _silence(cfg.bullet_gap_seconds)

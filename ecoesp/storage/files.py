@@ -24,12 +24,12 @@ def message_cache_path(cfg, message_id, name):
 def resolve_asset(override, bundled):
     """The user's override file if they made one, otherwise the shipped default.
 
-    Prompts, the email template, and the opening jingle ship with the app but are
-    the parts a user is most likely to want to change. Layering an override on
-    top of the shipped default keeps the app working out of the box, lets the
-    defaults keep improving without clobbering anyone's edits, and is the only
-    way to customise them at all once the app is a frozen single-file binary,
-    whose own files live in a throwaway extraction directory.
+    Prompts and the email template ship with the app and are the parts a user is
+    most likely to want to change. Layering an override on top of the shipped
+    default keeps the app working out of the box, lets the defaults keep
+    improving without clobbering anyone's edits, and is the only way to
+    customise them at all once the app is a frozen single-file binary, whose
+    own files live in a throwaway extraction directory.
     """
     return override if os.path.isfile(override) else bundled
 

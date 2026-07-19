@@ -14,11 +14,15 @@ audio_vocab prompt. All three files are atomically overwritten on each build.
 """
 
 from dataclasses import dataclass
+import logging
 import os
 import re
 
 from ..storage.files import atomic_write, message_cache_path
 from ..clients.gemini import ResponsePayloadError, _require_text, gemini_generate
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -88,7 +92,8 @@ def build_scripts(cfg, client, message_id, bullets, vocab_prompt, manifest=None)
         f'<<<END_INPUT_BULLET_{i:02d}>>>'
         for i, bullet in enumerate(bullets)
     )
-    print(f'Generating vocab scripts for {len(bullets)} bullets in one request...')
+    logger.debug(
+        'Generating vocab scripts for %s bullets in one request...', len(bullets))
     prompt = vocab_prompt.format(items=items)
 
     # Parse inside extract so a malformed batch is retried, while capturing the

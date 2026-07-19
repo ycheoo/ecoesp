@@ -2,6 +2,7 @@
 text-generation tasks and the audio pipeline.
 """
 
+import logging
 import random
 import time
 
@@ -9,6 +10,9 @@ import httpx
 from google import genai
 from google.genai import types
 import requests
+
+
+logger = logging.getLogger(__name__)
 
 
 class ResponsePayloadError(ValueError):
@@ -164,19 +168,21 @@ def gemini_generate(client, models, contents, config=None, start=0, extract=None
                     if not _is_retryable_error(e):
                         raise
                     if attempt == 4:
-                        print(f'{model} failed after 5 attempts: {e}')
+                        logger.warning('%s failed after 5 attempts: %s', model, e)
                         transient_exhausted = True
                         break
                     wait = _retry_delay(attempt)
-                    print(f'{model} transient error (attempt {attempt + 1}/5): {e}. '
-                          f'Retrying in {wait:.1f}s...')
+                    logger.warning(
+                        '%s transient error (attempt %s/5): %s. '
+                        'Retrying in %.1fs...', model, attempt + 1, e, wait)
                     time.sleep(wait)
 
             if quota_exc is not None and key_index + 1 < len(pool.clients):
                 next_index = key_index + 1
-                print(f'{model} quota exhausted on API key '
-                      f'{key_index + 1}/{len(pool.clients)}; switching to '
-                      f'API key {next_index + 1}/{len(pool.clients)}.')
+                logger.warning(
+                    '%s quota exhausted on API key %s/%s; switching to '
+                    'API key %s/%s.', model, key_index + 1, len(pool.clients),
+                    next_index + 1, len(pool.clients))
                 continue
             break
 
@@ -184,5 +190,5 @@ def gemini_generate(client, models, contents, config=None, start=0, extract=None
             nxt = f'; falling back to {models[i + 1]}' if i + 1 < len(models) else ''
             scope = (' across configured API keys'
                      if len(pool.clients) > 1 else '')
-            print(f'{model} out of quota{scope}{nxt}.')
+            logger.warning('%s out of quota%s%s.', model, scope, nxt)
     raise last_exc

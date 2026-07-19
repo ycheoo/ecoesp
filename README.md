@@ -134,7 +134,8 @@ GMAIL_QUERY=from:noreply@e.economist.com subject:"world in brief"
 
 Everything else is optional and documented in
 [`.env.example`](.env.example) (model choices, TTS voice, timeouts). In a source
-checkout, you can copy that file instead of creating an empty one.
+checkout, you can copy that file instead of creating an empty one. Standard
+`http_proxy`, `https_proxy`, and `no_proxy` environment variables are supported.
 
 ## 3. Run
 
@@ -158,9 +159,12 @@ It looks for a matching email from the last 24 hours, builds the translation, vo
 | `--require-audio` | Fail instead of sending a text-only email when audio generation fails |
 | `--prepare-only` | Build the translation and scripts but skip TTS and sending |
 | `--lookback-hours N` | Search the last `N` hours instead of 24 |
-| `--version` | Print the version (release binaries report their tag; source runs report `dev`) |
+| `-v`, `--verbose` | Show per-segment TTS progress, including the selected model and API-key position |
+| `-V`, `--version` | Print the version (release binaries report their tag; source runs report `dev`) |
 
 By default, if audio generation fails (for example the Gemini TTS free-tier quota runs out), the HTML and plain-text email is still sent without the MP3. A missing `ffmpeg` is detected before generation begins: a normal run still builds the translated email but skips the audio-only vocabulary and TTS steps, while `--require-audio` exits before any Gemini call. `--prepare-only` does not require `ffmpeg`.
+
+Normal output contains only major pipeline milestones plus retry, quota, and model-fallback warnings. During TTS, a journal-friendly progress bar advances whenever all three audio segments for a bullet are complete. Use `--verbose` when per-segment TTS progress is useful; `generation.json` records the model and API-key position for every generated artifact regardless of this flag.
 
 ## Optional: make it yours
 
@@ -195,6 +199,18 @@ Description=Translate the latest Economist Espresso email
 [Service]
 Type=oneshot
 ExecStart=%h/.local/bin/ecoesp
+TimeoutStartSec=30min
+```
+
+`TimeoutStartSec` bounds the complete run; systemd otherwise gives a
+`Type=oneshot` service no start timeout by default.
+
+The service does not read shell startup files such as `.zshrc`. If ecoesp
+needs a proxy, add the standard environment variables under `[Service]`:
+
+```ini
+Environment="http_proxy=http://127.0.0.1:8080"
+Environment="https_proxy=http://127.0.0.1:8080"
 ```
 
 When running from source instead, add
@@ -218,8 +234,11 @@ WantedBy=timers.target
 Then enable it:
 
 ```bash
+# On a headless server, keep the user service manager running after logout.
+sudo loginctl enable-linger "$USER"
 systemctl --user daemon-reload
 systemctl --user enable --now ecoesp.timer
+systemctl --user list-timers ecoesp.timer
 journalctl --user -u ecoesp.service -n 100   # inspect logs
 ```
 

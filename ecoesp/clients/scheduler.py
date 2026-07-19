@@ -61,10 +61,14 @@ class KeyScheduler:
 
     def mark_exhausted(self, key_index, model):
         """Record a per-day (RPD) exhaustion: never hand out this (key, model)
-        again for the rest of the run."""
+        again for the rest of the run. Return True only for the first report so
+        concurrent workers can suppress duplicate warnings atomically."""
         with self._cond:
-            self._exhausted.add((self._models.index(model), key_index))
+            pair = (self._models.index(model), key_index)
+            first_report = pair not in self._exhausted
+            self._exhausted.add(pair)
             self._cond.notify_all()
+            return first_report
 
     def penalize(self, key_index, model):
         """Fill (key, model)'s minute window — the RPM-429 safety net."""
