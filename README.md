@@ -47,7 +47,14 @@ python3 -m venv .venv
 ## 1. Gmail OAuth
 
 1. In the [Google Cloud Console](https://console.cloud.google.com/), create a project and **enable the Gmail API**.
-2. Configure the OAuth consent screen; while it is in *Testing* mode, add your Gmail address as a test user.
+2. Configure an **External** OAuth consent screen. For the initial setup, it can
+   remain in **Testing** while you add your Gmail address as a test user. Before
+   relying on scheduled runs, change its publishing status to **In production**:
+   Google [expires refresh tokens](https://developers.google.com/identity/protocols/oauth2#expiration)
+   for External apps in Testing after seven days when they request Gmail access.
+   An unverified production project may still show a warning and is subject to
+   Google's user cap, which is sufficient for a personal project with its own
+   OAuth client.
 3. Create an **OAuth Client ID** of type **Desktop app** and download the JSON.
 4. Save it as `~/.config/ecoesp/credentials.json` and lock it down:
 
@@ -57,7 +64,46 @@ mv ~/Downloads/client_secret_*.json ~/.config/ecoesp/credentials.json
 chmod 600 ~/.config/ecoesp/credentials.json
 ```
 
-The tool requests read-only + send access to Gmail. The first run opens a browser once to authorize; the token is cached under `~/.local/state/ecoesp/`.
+Authorize Gmail without running the email pipeline. For the prebuilt binary:
+
+```bash
+ecoesp auth
+```
+
+From a source checkout:
+
+```bash
+.venv/bin/python -m ecoesp auth
+```
+
+If you already authorized while the OAuth app was in Testing, switch it to In
+production, remove the old token, and authorize once more so scheduled runs do
+not keep using the seven-day Testing token:
+
+```bash
+rm ~/.local/state/ecoesp/token.pickle
+ecoesp auth
+```
+
+The command only creates, validates, or refreshes the Gmail token; it does not
+require the Gemini or delivery settings, search for mail, generate content, or
+send anything. The tool requests read-only + send access to Gmail. In a graphical
+desktop session, it opens a browser when consent is needed and caches the token at
+`~/.local/state/ecoesp/token.pickle`. Normal pipeline runs refresh that token
+silently but never start authorization themselves: with no usable token they
+stop and tell you to run `ecoesp auth`, so a scheduled or scripted run can
+never hang waiting for a person.
+
+On a headless server (SSH session), `ecoesp auth` prints a Google authorization
+link instead of opening a browser. Open the link in a browser on any device —
+your laptop, even a phone — and approve access. The browser then lands on a
+`localhost` page that fails to load: that is expected. Copy the full URL from
+its address bar and paste it back into the terminal; ecoesp exchanges it for the
+token and you are done — no file copying between machines needed.
+
+Alternatively, a `token.pickle` authorized on another machine can be copied to
+`~/.local/state/ecoesp/token.pickle` (run `chmod 600` on it; treat it as a
+secret).
 
 ## 2. Configuration
 
@@ -114,7 +160,7 @@ It looks for a matching email from the last 24 hours, builds the translation, vo
 | `--lookback-hours N` | Search the last `N` hours instead of 24 |
 | `--version` | Print the version (release binaries report their tag; source runs report `dev`) |
 
-By default, if audio generation fails (for example the Gemini TTS free-tier quota runs out), the HTML and plain-text email is still sent without the MP3.
+By default, if audio generation fails (for example the Gemini TTS free-tier quota runs out), the HTML and plain-text email is still sent without the MP3. A missing `ffmpeg` is detected before generation begins: a normal run still builds the translated email but skips the audio-only vocabulary and TTS steps, while `--require-audio` exits before any Gemini call. `--prepare-only` does not require `ffmpeg`.
 
 ## Optional: make it yours
 
@@ -136,7 +182,11 @@ ffmpeg -i my-opening.mp3 -f s16le -ar 24000 -ac 1 ~/.local/share/ecoesp/opening.
 
 ## Optional: run it daily with systemd
 
-Complete the browser authorization once in a terminal, then add a user service and timer so it runs each morning after the newsletter arrives. Create `~/.config/systemd/user/ecoesp.service`:
+Set the OAuth consent screen to **In production** as described above, then run
+`ecoesp auth` once in a terminal — the timer itself cannot answer an
+authorization prompt, and a Testing-mode refresh token expires after seven
+days. Then add a user service and timer so it runs each morning after the
+newsletter arrives. Create `~/.config/systemd/user/ecoesp.service`:
 
 ```ini
 [Unit]
@@ -198,7 +248,7 @@ The tool follows the XDG base-directory convention and never writes into the pro
 
 - **`credentials.json not found`** — make sure the OAuth JSON is at `~/.config/ecoesp/credentials.json` (or set `GOOGLE_CREDENTIALS_PATH`).
 - **No email arrives** — check the terminal/journal output; confirm `GMAIL_QUERY` matches a message from the last 24 hours (`--lookback-hours` widens the window).
-- **Email has no MP3** — usually TTS quota exhaustion or a missing `ffmpeg`; look for `Audio generation failed` in the output. Adding more `GEMINI_API_KEY` values gives the audio step more quota.
+- **Email has no MP3** — install `ffmpeg` if the output says it is missing. Other audio failures are reported as `Audio generation failed`; TTS quota exhaustion is the most common, and adding more `GEMINI_API_KEY` values gives the audio step more quota.
 
 ## License
 

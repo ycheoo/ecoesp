@@ -35,6 +35,14 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True)
+class AuthConfig:
+    app_config_dir: str
+    app_state_dir: str
+    token_path: str
+    credentials_path: str
+
+
+@dataclass(frozen=True)
 class Config:
     template_dir: str
     app_config_dir: str
@@ -123,7 +131,7 @@ def _seconds(name, default, errors):
     return value
 
 
-def load_config():
+def _load_base_paths():
     app_config_dir = os.environ.get(
         f'{APP_NAME.upper()}_CONFIG_DIR',
         os.path.join(_xdg_dir('XDG_CONFIG_HOME', '.config'), APP_NAME),
@@ -139,6 +147,42 @@ def load_config():
         f'{APP_NAME.upper()}_STATE_DIR',
         os.path.join(_xdg_dir('XDG_STATE_HOME', '.local/state'), APP_NAME),
     )
+    return app_config_dir, app_state_dir, config_path
+
+
+def _credentials_path(app_config_dir, errors):
+    path = os.environ.get(
+        'GOOGLE_CREDENTIALS_PATH',
+        os.path.join(app_config_dir, 'credentials.json'),
+    ).strip()
+    if not path:
+        errors.append('GOOGLE_CREDENTIALS_PATH must not be empty')
+    return path
+
+
+def load_auth_config():
+    """Load only the paths needed to authorize Gmail.
+
+    The dedicated `auth` command must work before Gemini and delivery settings
+    exist, so it deliberately does not validate the main pipeline's environment.
+    """
+    app_config_dir, app_state_dir, config_path = _load_base_paths()
+    errors = []
+    credentials_path = _credentials_path(app_config_dir, errors)
+    if errors:
+        raise ConfigError(errors, config_path)
+
+    os.makedirs(app_state_dir, exist_ok=True)
+    return AuthConfig(
+        app_config_dir=app_config_dir,
+        app_state_dir=app_state_dir,
+        token_path=os.path.join(app_state_dir, 'token.pickle'),
+        credentials_path=credentials_path,
+    )
+
+
+def load_config():
+    app_config_dir, app_state_dir, config_path = _load_base_paths()
     app_cache_dir = os.environ.get(
         f'{APP_NAME.upper()}_CACHE_DIR',
         os.path.join(_xdg_dir('XDG_CACHE_HOME', '.cache'), APP_NAME),
@@ -170,12 +214,7 @@ def load_config():
     # subject through unchanged.
     subject_prefix = os.environ.get('SUBJECT_PREFIX', '[译]').strip()
 
-    credentials_path = os.environ.get(
-        'GOOGLE_CREDENTIALS_PATH',
-        os.path.join(app_config_dir, 'credentials.json'),
-    ).strip()
-    if not credentials_path:
-        errors.append('GOOGLE_CREDENTIALS_PATH must not be empty')
+    credentials_path = _credentials_path(app_config_dir, errors)
 
     if errors:
         raise ConfigError(errors, config_path)
