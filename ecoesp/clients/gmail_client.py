@@ -8,6 +8,7 @@ import logging
 import os
 import pickle
 import re
+import ssl
 import sys
 import time
 import webbrowser
@@ -35,8 +36,17 @@ from ..storage.files import atomic_write
 logger = logging.getLogger(__name__)
 
 
+GMAIL_UPLOAD_CHUNK_SIZE = 3 * 1024 * 1024
+GMAIL_UPLOAD_RETRIES = 3
+GMAIL_API_RETRIES = 5
+
+
 class GmailAuthenticationError(RuntimeError):
     """Gmail authorization cannot be completed in the current environment."""
+
+
+class GmailDeliveryError(RuntimeError):
+    """Gmail delivery failed or could not be confirmed."""
 
 
 def _has_graphical_session():
@@ -161,11 +171,18 @@ def _authorize_in_terminal(cfg):
 
 
 def _authorized_http(cfg, creds):
-    """An httplib2 transport carrying the OAuth credentials, left at httplib2's
-    defaults so it honors whatever proxy environment the launching process (e.g.
-    a systemd unit) sets. AuthorizedHttp refreshes tokens over this same
-    transport, so refreshes use the same connection settings."""
+    """An httplib2 transport carrying the OAuth credentials.
+
+    The default proxy discovery still honors the launching process environment
+    (including a systemd unit). HTTP 308 is removed from httplib2's redirect
+    statuses because Google resumable uploads use it without a Location header
+    to report chunk progress; googleapiclient understands that response, while
+    httplib2 otherwise raises RedirectMissingLocation first. Other redirect
+    statuses keep their normal behavior.
+    AuthorizedHttp refreshes tokens over this same transport.
+    """
     http = httplib2.Http(timeout=180)
+    http.redirect_codes = http.redirect_codes - {308}
     return google_auth_httplib2.AuthorizedHttp(creds, http=http)
 
 
@@ -458,19 +475,55 @@ def get_email_content(service, message_id):
     return subject, sender, text
 
 
-def send_email(cfg, service, original_subject, html_content, plain_content, audio_path=None):
+def _execute_resumable_send(request):
+    """Execute one resumable Gmail upload, recovering transport interruptions.
+
+    googleapiclient retries HTTP responses internally, but a timeout during the
+    media PUT escapes after marking the request as resumable. Calling execute()
+    again on the same request lets it query the existing upload session before
+    continuing, which is safer than starting a new send request that could
+    duplicate a message whose final response was merely lost in transit.
+    """
+    transport_errors = (
+        TimeoutError, ConnectionError, ssl.SSLError, httplib2.HttpLib2Error)
+    for retry in range(GMAIL_UPLOAD_RETRIES + 1):
+        try:
+            return request.execute(num_retries=GMAIL_API_RETRIES)
+        except transport_errors as e:
+            reason = str(e).strip() or type(e).__name__
+            if retry == GMAIL_UPLOAD_RETRIES:
+                raise GmailDeliveryError(
+                    'the Gmail upload could not be confirmed after '
+                    f'{GMAIL_UPLOAD_RETRIES + 1} attempts ({reason}). Delivery '
+                    'status is unknown; check the destination mailbox before '
+                    'retrying.') from e
+            delay = 2 ** (retry + 1)
+            logger.warning(
+                'Gmail upload interrupted (%s); resuming the same upload, '
+                'retry %s/%s in %ss.', reason, retry + 1,
+                GMAIL_UPLOAD_RETRIES, delay)
+            time.sleep(delay)
+
+
+def send_email(cfg, service, original_subject, html_content, plain_content,
+               audio_tracks=None):
+    """Send the result. `audio_tracks` is a list of (name, mp3 path); each is
+    attached as <name>_<date>.mp3, so several tracks ride one email."""
+    audio_tracks = audio_tracks or []
     alternative = MIMEMultipart('alternative')
     alternative.attach(MIMEText(plain_content, 'plain', 'utf-8'))
     alternative.attach(MIMEText(html_content, 'html', 'utf-8'))
 
-    if audio_path:
+    if audio_tracks:
         msg = MIMEMultipart('mixed')
         msg.attach(alternative)
-        with open(audio_path, 'rb') as f:
-            audio = MIMEAudio(f.read(), _subtype='mpeg')
-        audio.add_header('Content-Disposition', 'attachment',
-                         filename=f'espresso-{date.today().isoformat()}.mp3')
-        msg.attach(audio)
+        today = date.today().isoformat()
+        for name, audio_path in audio_tracks:
+            with open(audio_path, 'rb') as f:
+                audio = MIMEAudio(f.read(), _subtype='mpeg')
+            audio.add_header('Content-Disposition', 'attachment',
+                             filename=f'{name}_{today}.mp3')
+            msg.attach(audio)
     else:
         msg = alternative
 
@@ -481,10 +534,19 @@ def send_email(cfg, service, original_subject, html_content, plain_content, audi
     msg['To'] = cfg.dest_email
 
     # Media upload handles large messages (audio attachments) that break the
-    # JSON body's size limit. num_retries backs off and retries transient upload
-    # failures (e.g. an intermittent SSL error on a large upload).
+    # JSON body's size limit. Three-MiB chunks keep each proxy request bounded;
+    # the outer recovery loop handles transport errors that googleapiclient's
+    # num_retries does not retry during the media PUT itself.
     media = MediaIoBaseUpload(io.BytesIO(msg.as_bytes()),
-                              mimetype='message/rfc822', resumable=True)
-    service.users().messages().send(
-        userId='me', body={}, media_body=media).execute(num_retries=5)
+                              mimetype='message/rfc822',
+                              chunksize=GMAIL_UPLOAD_CHUNK_SIZE,
+                              resumable=True)
+    request = service.users().messages().send(
+        userId='me', body={}, media_body=media)
+    try:
+        _execute_resumable_send(request)
+    except GmailDeliveryError:
+        raise
+    except Exception as e:
+        raise GmailDeliveryError(f'the Gmail API request failed ({e})') from e
     logger.info('Sent: %s', subject)

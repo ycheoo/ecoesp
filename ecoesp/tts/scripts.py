@@ -80,12 +80,25 @@ def _parse_vocab_batch(text, expected_count):
     return scripts
 
 
-def build_scripts(cfg, client, message_id, bullets, vocab_prompt, manifest=None):
+def build_scripts(cfg, client, message_id, bullets, vocab_prompt,
+                  manifest=None, need_vocab=True):
     """Write the original/translation/vocab script files for every bullet and
-    return the matching BulletScripts list in document order."""
+    return the matching BulletScripts list in document order.
+
+    The original and translation scripts are the parsed bullet text, written
+    for free. Vocab is a separate Gemini call, so it is generated only when
+    `need_vocab` is set (some audio track references it); otherwise each
+    BulletScripts carries an empty vocab and no call is made."""
     for i, bullet in enumerate(bullets):
         atomic_write(_script_path(cfg, message_id, 'original', i), bullet.original)
         atomic_write(_script_path(cfg, message_id, 'translation', i), bullet.translation)
+
+    if not need_vocab:
+        return [
+            BulletScripts(original=bullet.original,
+                          translation=bullet.translation, vocab='')
+            for bullet in bullets
+        ]
 
     items = '\n\n'.join(
         f'<<<INPUT_BULLET_{i:02d}>>>\n{bullet.vocab_raw}\n'

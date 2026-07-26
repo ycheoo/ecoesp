@@ -1,8 +1,8 @@
-# ecoesp — Economist Espresso Translator
+# ecoesp - Economist Espresso Study Pack
 
-A small tool that turns the daily [Economist Espresso](https://www.economist.com/espresso) "The world in brief" email into a bilingual study pack. It reads the latest newsletter from your Gmail, uses Google's Gemini models to translate it into Chinese and annotate the tricky vocabulary, generates a spoken bilingual recording, and emails the HTML, plain-text, and MP3 back to you.
+A small tool that turns the daily [Economist Espresso](https://www.economist.com/espresso) "The world in brief" email into a bilingual study pack. It reads the latest newsletter from your Gmail, uses Google's Gemini models to translate it into Chinese and annotate the tricky vocabulary, generates configured spoken recordings, and emails the HTML, plain-text, and MP3s back to you.
 
-For each *Today's Top Stories* bullet the recording plays: English original → vocabulary explanation → English original → Chinese translation → English original once more — a rhythm for listening practice.
+By default, for each *Today's Top Stories* bullet the recording plays: English original → vocabulary explanation → English original → Chinese translation → English original once more — a rhythm for listening practice. You can change the order, add more recordings, or generate a plain read-through — see [Optional: make it yours](#optional-make-it-yours).
 
 ## What you need
 
@@ -164,13 +164,26 @@ It looks for a matching email from the last 24 hours, builds the translation, vo
 
 By default, if audio generation fails (for example the Gemini TTS free-tier quota runs out), the HTML and plain-text email is still sent without the MP3. A missing `ffmpeg` is detected before generation begins: a normal run still builds the translated email but skips the audio-only vocabulary and TTS steps, while `--require-audio` exits before any Gemini call. `--prepare-only` does not require `ffmpeg`.
 
-Normal output contains only major pipeline milestones plus retry, quota, and model-fallback warnings. During TTS, a journal-friendly progress bar advances whenever all three audio segments for a bullet are complete. Use `--verbose` when per-segment TTS progress is useful; `generation.json` records the model and API-key position for every generated artifact regardless of this flag.
+Normal output contains only major pipeline milestones plus retry, quota, and model-fallback warnings. During TTS, a journal-friendly progress bar advances whenever all audio parts referenced by the configured tracks are complete for a bullet. Use `--verbose` when per-segment TTS progress is useful; `generation.json` records the model and API-key position for every generated artifact regardless of this flag.
 
 ## Optional: make it yours
 
 Everything below is optional — the tool works out of the box without any of it.
 
-**An opening jingle.** Drop a clip at `~/.local/share/ecoesp/opening.pcm` to play a personal intro before every recording. It must be raw signed 16-bit little-endian PCM, 24kHz, mono — the format Gemini TTS returns — so convert yours with:
+**The recordings.** `~/.config/ecoesp/audio.json`, written on first run, controls how many MP3s you get and how each is built. Each track becomes one attachment, `<name>_<date>.mp3`:
+
+```json
+{
+  "tracks": [
+    { "name": "study", "segments": ["original", "vocab", "original", "translation", "original"] },
+    { "name": "listen", "segments": ["original"], "opening": false }
+  ]
+}
+```
+
+`name` may contain ASCII letters, digits, hyphens, and underscores. `segments` is the per-bullet order, chosen from `original`, `vocab`, and `translation`. Optional per track: `opening` (default `true`), `segment_gap_seconds` (default `0.8`), `bullet_gap_seconds` (default `1.2`); gaps must be between `0` and `60` seconds. Only referenced parts are sent to TTS, so a translation-only track skips original and vocab TTS. If no track uses `vocab`, its separate Gemini text-generation request is also skipped.
+
+**An opening jingle.** Drop a clip at `~/.local/share/ecoesp/opening.pcm` to play a personal intro before each track whose `opening` is true. It must be raw signed 16-bit little-endian PCM, 24kHz, mono — the format Gemini TTS returns — so convert yours with:
 
 ```bash
 ffmpeg -i my-opening.mp3 -f s16le -ar 24000 -ac 1 ~/.local/share/ecoesp/opening.pcm
@@ -182,7 +195,7 @@ ffmpeg -i my-opening.mp3 -f s16le -ar 24000 -ac 1 ~/.local/share/ecoesp/opening.
 
 **The email template.** Drop a file at `~/.config/ecoesp/email.html`; `{body}` is replaced with the rendered story.
 
-**Pacing and the subject line.** `SEGMENT_GAP_SECONDS`, `BULLET_GAP_SECONDS`, and `SUBJECT_PREFIX` in your `.env` — see `.env.example`.
+**The subject line.** `SUBJECT_PREFIX` in your `.env` — see `.env.example`.
 
 ## Optional: run it daily with systemd
 
@@ -258,7 +271,7 @@ The tool follows the XDG base-directory convention and never writes into the pro
 
 | Path | Contents |
 | --- | --- |
-| `~/.config/ecoesp/` | `.env`, `credentials.json`, and any prompt or email-template overrides |
+| `~/.config/ecoesp/` | `.env`, `credentials.json`, `audio.json`, and any prompt or email-template overrides |
 | `~/.local/share/ecoesp/` | Your own assets — currently `opening.pcm` |
 | `~/.local/state/ecoesp/` | OAuth token, list of already-delivered messages |
 | `~/.cache/ecoesp/` | Generated text and audio, grouped by Gmail message ID (auto-pruned after 7 days) |

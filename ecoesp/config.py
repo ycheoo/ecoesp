@@ -2,7 +2,10 @@
 
 from dataclasses import dataclass
 from email.utils import parseaddr
+import json
+import math
 import os
+import re
 
 from dotenv import load_dotenv
 
@@ -17,7 +20,12 @@ SCOPES = [
 # binary alike. Users override them from their config dir rather than editing
 # these, so nothing here needs to be writable.
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'template')
-DEFAULT_TEXT_MODELS = ['gemini-3.5-flash', 'gemini-3-flash-preview', 'gemini-2.5-flash']
+DEFAULT_TEXT_MODELS = [
+    'gemini-3.6-flash',
+    'gemini-3.5-flash',
+    'gemini-3-flash-preview',
+    'gemini-2.5-flash',
+]
 DEFAULT_TTS_MODELS = ['gemini-3.1-flash-tts-preview', 'gemini-2.5-flash-preview-tts']
 
 # The app's runtime identity (XDG directory leaf and env-var prefix) follows the
@@ -25,6 +33,27 @@ DEFAULT_TTS_MODELS = ['gemini-3.1-flash-tts-preview', 'gemini-2.5-flash-preview-
 # the public `ecoesp` fork — therefore gives it its own config/state/cache
 # namespace automatically, with no source edits.
 APP_NAME = (__package__ or 'ecoesp').split('.')[0]
+
+# The spoken parts a track may arrange. 'original' and 'translation' come free
+# from the main translation; 'vocab' costs a separate Gemini call, generated
+# only when some track uses it.
+AUDIO_PARTS = ('original', 'vocab', 'translation')
+DEFAULT_SEGMENT_GAP_SECONDS = 0.8
+DEFAULT_BULLET_GAP_SECONDS = 1.2
+MAX_AUDIO_GAP_SECONDS = 60.0
+
+# Written to <config dir>/audio.json on first run. Each track becomes one MP3:
+# 'segments' is the per-bullet playback order, and the optional 'opening',
+# 'segment_gap_seconds', and 'bullet_gap_seconds' fall back to the defaults
+# above when omitted.
+DEFAULT_AUDIO_CONFIG = {
+    'tracks': [
+        {
+            'name': 'study',
+            'segments': ['original', 'vocab', 'original', 'translation', 'original'],
+        }
+    ]
+}
 
 
 class ConfigError(ValueError):
@@ -40,6 +69,16 @@ class AuthConfig:
     app_state_dir: str
     token_path: str
     credentials_path: str
+
+
+@dataclass(frozen=True)
+class AudioTrack:
+    """One rendered MP3: a per-bullet segment order with its own pacing."""
+    name: str
+    segments: tuple[str, ...]
+    opening: bool
+    segment_gap_seconds: float
+    bullet_gap_seconds: float
 
 
 @dataclass(frozen=True)
@@ -60,8 +99,7 @@ class Config:
     tts_models: list[str]
     tts_voice: str
     gemini_timeout_ms: int
-    segment_gap_seconds: float
-    bullet_gap_seconds: float
+    audio_tracks: tuple[AudioTrack, ...]
     subject_prefix: str
 
 
@@ -118,17 +156,106 @@ def _positive_int(name, default, errors):
     return value
 
 
-def _seconds(name, default, errors):
-    """A duration in seconds. Zero is allowed: it turns the gap off."""
-    raw = os.environ.get(name, str(default)).strip()
-    try:
-        value = float(raw)
-    except ValueError:
-        errors.append(f'{name} must be a non-negative number, got {raw!r}')
+def _track_seconds(raw, key, label, errors):
+    """A per-track duration in seconds, defaulting when the field is absent.
+    Zero is allowed: it turns the gap off. Values are capped to prevent a typo
+    from allocating an unbounded silence buffer during assembly."""
+    default = (DEFAULT_SEGMENT_GAP_SECONDS if key == 'segment_gap_seconds'
+               else DEFAULT_BULLET_GAP_SECONDS)
+    if key not in raw:
         return default
-    if value < 0:
-        errors.append(f'{name} must be a non-negative number, got {raw!r}')
-    return value
+    value = raw[key]
+    if (isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not 0 <= value <= MAX_AUDIO_GAP_SECONDS
+            or not math.isfinite(value)):
+        errors.append(
+            f'{label} "{key}" must be a finite number between 0 and '
+            f'{MAX_AUDIO_GAP_SECONDS:g} seconds')
+        return default
+    return float(value)
+
+
+def _parse_audio_tracks(data, config_path, errors):
+    """Validate the parsed audio.json into a tuple of AudioTrack, collecting
+    every problem into errors rather than stopping at the first."""
+    if not isinstance(data, dict) or not isinstance(data.get('tracks'), list):
+        errors.append('audio.json must be an object with a "tracks" array')
+        return ()
+    if not data['tracks']:
+        errors.append('audio.json must define at least one track')
+        return ()
+
+    tracks = []
+    seen = set()
+    for i, raw in enumerate(data['tracks']):
+        label = f'audio.json tracks[{i}]'
+        if not isinstance(raw, dict):
+            errors.append(f'{label} must be an object')
+            continue
+
+        name = raw.get('name')
+        if not isinstance(name, str) or not name.strip():
+            errors.append(f'{label} needs a non-empty "name"')
+            name = None
+        else:
+            name = name.strip()
+            if not re.fullmatch(r'[A-Za-z0-9_-]+', name):
+                errors.append(
+                    f'{label} "name" may contain only ASCII letters, digits, '
+                    'hyphens, and underscores')
+                name = None
+            elif name in seen:
+                errors.append(f'audio.json has a duplicate track name {name!r}')
+            if name is not None:
+                seen.add(name)
+
+        segments = raw.get('segments')
+        if not isinstance(segments, list) or not segments:
+            errors.append(f'{label} needs a non-empty "segments" list')
+            segments = None
+        else:
+            invalid = [s for s in segments if s not in AUDIO_PARTS]
+            if invalid:
+                errors.append(
+                    f'{label} has invalid segment(s) {invalid}; valid parts '
+                    f'are {list(AUDIO_PARTS)}')
+                segments = None
+
+        opening = raw.get('opening', True)
+        if not isinstance(opening, bool):
+            errors.append(f'{label} "opening" must be true or false')
+            opening = True
+
+        segment_gap = _track_seconds(raw, 'segment_gap_seconds', label, errors)
+        bullet_gap = _track_seconds(raw, 'bullet_gap_seconds', label, errors)
+
+        if name is not None and segments is not None:
+            tracks.append(AudioTrack(
+                name=name, segments=tuple(segments), opening=opening,
+                segment_gap_seconds=segment_gap, bullet_gap_seconds=bullet_gap))
+    return tuple(tracks)
+
+
+def _load_audio_tracks(app_config_dir, errors):
+    """Read <config dir>/audio.json, materializing the default on first run.
+
+    The file is a settings file the user is meant to edit, so unlike the
+    prompt/email overrides it is written out once (never overwritten) rather
+    than shadowed from a package default. A present-but-broken file is reported,
+    not clobbered."""
+    path = os.path.join(app_config_dir, 'audio.json')
+    if not os.path.exists(path):
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(DEFAULT_AUDIO_CONFIG, f, indent=2, ensure_ascii=False)
+            f.write('\n')
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        errors.append(f'audio.json could not be read ({e})')
+        return ()
+    return _parse_audio_tracks(data, path, errors)
 
 
 def _load_base_paths():
@@ -206,10 +333,9 @@ def load_config():
     if not tts_voice:
         errors.append('TTS_VOICE must not be empty')
     gemini_timeout_ms = _positive_int('GEMINI_TIMEOUT_MS', 180000, errors)
-    # Silence between spoken segments inside one bullet, and the longer silence
-    # between one bullet and the next. Tune after listening.
-    segment_gap_seconds = _seconds('SEGMENT_GAP_SECONDS', 0.8, errors)
-    bullet_gap_seconds = _seconds('BULLET_GAP_SECONDS', 1.2, errors)
+    # The audio tracks — segment order, pacing, and opening per rendered MP3 —
+    # live in audio.json, generated on first run and edited by the user.
+    audio_tracks = _load_audio_tracks(app_config_dir, errors)
     # Prepended to the source subject on the email we send back. Empty sends the
     # subject through unchanged.
     subject_prefix = os.environ.get('SUBJECT_PREFIX', '[译]').strip()
@@ -241,7 +367,6 @@ def load_config():
         tts_models=tts_models,
         tts_voice=tts_voice,
         gemini_timeout_ms=gemini_timeout_ms,
-        segment_gap_seconds=segment_gap_seconds,
-        bullet_gap_seconds=bullet_gap_seconds,
+        audio_tracks=audio_tracks,
         subject_prefix=subject_prefix,
     )

@@ -14,6 +14,7 @@ from .storage.delivery_state import mark_processed, was_processed
 from .clients.gemini import make_gemini_client
 from .clients.gmail_client import (
     GmailAuthenticationError,
+    GmailDeliveryError,
     find_espresso_email,
     get_email_content,
     get_gmail_credentials,
@@ -115,15 +116,21 @@ def run(args):
     logger.info('Building HTML email...')
     html_email = build_html_email(cfg, processed)
 
-    audio_path = None
+    # Only the parts some track actually plays are generated; vocab is the one
+    # part that costs a Gemini call, so it is skipped when no track uses it.
+    needed_parts = {part for track in cfg.audio_tracks for part in track.segments}
+    need_vocab = 'vocab' in needed_parts
+
+    audio_tracks = []
     if not skip_audio:
         try:
             logger.info('Building per-bullet study scripts...')
             bullets = parse_top_stories(processed)
             validate_top_stories(bullets)
-            vocab_prompt = load_prompt(cfg, 'text_vocab.md')
+            vocab_prompt = load_prompt(cfg, 'text_vocab.md') if need_vocab else ''
             scripts = build_scripts(
-                cfg, client, message_id, bullets, vocab_prompt, manifest=manifest)
+                cfg, client, message_id, bullets, vocab_prompt,
+                manifest=manifest, need_vocab=need_vocab)
 
             if args.prepare_only:
                 logger.info(
@@ -132,16 +139,20 @@ def run(args):
                 return 0
 
             bullet_unit = 'bullet' if len(scripts) == 1 else 'bullets'
+            track_unit = 'track' if len(cfg.audio_tracks) == 1 else 'tracks'
             logger.info(
-                'Synthesizing audio for %s %s...', len(scripts), bullet_unit)
+                'Synthesizing %s %s from %s %s...',
+                len(cfg.audio_tracks), track_unit, len(scripts), bullet_unit)
             opening_pcm = load_opening_pcm(cfg)
             instructions = {part: load_prompt(cfg, f'tts_{part}.md')
-                            for part in ('original', 'vocab', 'translation')}
-            audio_path = synthesize_study_audio(
+                            for part in sorted(needed_parts)}
+            audio_tracks = synthesize_study_audio(
                 cfg, client, message_id, scripts, opening_pcm, instructions,
                 manifest=manifest)
-            size_mb = os.path.getsize(audio_path) / 1024 / 1024
-            logger.info('Audio ready: %s (%.1f MB)', audio_path, size_mb)
+            total_mb = sum(os.path.getsize(path)
+                           for _, path in audio_tracks) / 1024 / 1024
+            names = ', '.join(name for name, _ in audio_tracks)
+            logger.info('Audio ready: %s (%.1f MB total)', names, total_mb)
         except Exception as e:
             if args.prepare_only:
                 logger.error('Audio preparation failed (%s); email not sent.', e)
@@ -151,9 +162,15 @@ def run(args):
                 return 1
             logger.warning(
                 'Audio generation failed (%s); sending text-only email.', e)
+            audio_tracks = []
 
     logger.info('Sending processed email...')
-    send_email(cfg, service, subject, html_email, processed, audio_path)
+    try:
+        send_email(cfg, service, subject, html_email, processed, audio_tracks)
+    except GmailDeliveryError as e:
+        logger.error('Email delivery failed: %s', e)
+        logger.debug('Gmail delivery failure details', exc_info=True)
+        return 1
     mark_processed(cfg, message_id, subject)
     logger.info('Done!')
     return 0

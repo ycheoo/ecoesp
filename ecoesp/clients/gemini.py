@@ -102,6 +102,17 @@ def _retry_delay(attempt):
     return min(2 ** attempt, 30) + random.uniform(0, 1)
 
 
+def _error_summary(error):
+    """Concise retry reason for normal logs; verbose logs retain the detail."""
+    code = getattr(error, 'code', None)
+    status = getattr(error, 'status', None)
+    if code is not None:
+        return f'{code} {status}' if status else str(code)
+    if isinstance(error, ResponsePayloadError):
+        return str(error)
+    return type(error).__name__
+
+
 def _require_text(response):
     """Extract non-empty text from a response, raising if it is missing."""
     text = response.text
@@ -168,13 +179,16 @@ def gemini_generate(client, models, contents, config=None, start=0, extract=None
                     if not _is_retryable_error(e):
                         raise
                     if attempt == 4:
-                        logger.warning('%s failed after 5 attempts: %s', model, e)
+                        logger.debug(
+                            '%s final transient error detail: %s', model, e)
                         transient_exhausted = True
                         break
                     wait = _retry_delay(attempt)
                     logger.warning(
-                        '%s transient error (attempt %s/5): %s. '
-                        'Retrying in %.1fs...', model, attempt + 1, e, wait)
+                        '%s transient failure (%s); retry %s/4 in %.1fs.',
+                        model, _error_summary(e), attempt + 1, wait)
+                    logger.debug(
+                        '%s transient error detail: %s', model, e)
                     time.sleep(wait)
 
             if quota_exc is not None and key_index + 1 < len(pool.clients):
@@ -186,7 +200,18 @@ def gemini_generate(client, models, contents, config=None, start=0, extract=None
                 continue
             break
 
-        if quota_exc is not None and not transient_exhausted:
+        if transient_exhausted:
+            if i + 1 < len(models):
+                logger.warning(
+                    '%s unavailable after 5 attempts; falling back to %s.',
+                    model, models[i + 1])
+            else:
+                logger.warning(
+                    '%s unavailable after 5 attempts; no fallback model '
+                    'remains.', model)
+            continue
+
+        if quota_exc is not None:
             nxt = f'; falling back to {models[i + 1]}' if i + 1 < len(models) else ''
             scope = (' across configured API keys'
                      if len(pool.clients) > 1 else '')

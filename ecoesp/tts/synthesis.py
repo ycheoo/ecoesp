@@ -110,9 +110,9 @@ def _tts_config(cfg):
     )
 
 
-def _encode_mp3(cfg, message_id, pcm):
-    """Encode the assembled PCM stream to the message's espresso.mp3."""
-    mp3_path = message_cache_path(cfg, message_id, 'espresso.mp3')
+def _encode_mp3(cfg, message_id, filename, pcm):
+    """Encode the assembled PCM stream to the given file in the message cache."""
+    mp3_path = message_cache_path(cfg, message_id, filename)
     # Gemini TTS returns raw 16-bit 24kHz mono PCM.
     subprocess.run(
         ['ffmpeg', '-y', '-f', 's16le', '-ar', '24000', '-ac', '1', '-i', '-',
@@ -182,7 +182,7 @@ def _synthesize_segment(scheduler, label, content, config):
                     and transient_retries < TTS_TRANSIENT_RETRIES):
                 delay = 2 ** (transient_retries + 1)
                 transient_retries += 1
-                logger.warning(
+                logger.debug(
                     '%s: transient error from %s on %s; retry %s/%s in %ss: %s',
                     label, model, key_label, transient_retries,
                     TTS_TRANSIENT_RETRIES, delay, e)
@@ -193,36 +193,39 @@ def _synthesize_segment(scheduler, label, content, config):
 
 def synthesize_study_audio(cfg, client, message_id, scripts, opening_pcm=b'',
                            instructions=None, manifest=None):
-    """Render the per-bullet study scripts into one MP3 and return its path.
+    """Render the configured audio tracks and return [(track name, mp3 path)].
 
-    Each bullet's original, vocabulary, and translation are synthesized as three
-    separate TTS clips; the English original is synthesized once and its clip is
-    reused for all three readings, so they are byte-identical. `instructions`
-    maps each part ('original', 'vocab', 'translation') to the TTS instruction
-    prepended to that segment's text, so each part can be narrated differently.
-    Keys and models are handed out by a shared KeyScheduler: it holds each
+    Every part referenced by any track (`cfg.audio_tracks`) is synthesized once
+    per bullet as its own TTS clip; a clip reused several times within a track,
+    such as the English original, is byte-identical each time. Only the union of
+    referenced parts is synthesized, so a track list that never uses vocab or
+    translation costs no TTS for them. `instructions` maps a part to the TTS
+    instruction prepended to that segment's text, so each part is narrated
+    differently. Keys and models come from a shared KeyScheduler: it holds each
     (key, model) to TTS_RPM requests per minute, prefers the first `TTS_MODELS`
-    entry, and downgrades to the next model only once every key's earlier model
-    is exhausted for the day. Concurrency is keys x TTS_RPM. Clips are assembled
-    in document order: the opening, then per bullet original / vocabulary /
-    original / translation / original."""
+    entry, and downgrades only once every key's earlier model is exhausted for
+    the day; concurrency is keys x TTS_RPM. Each track is then assembled from
+    the same clips in its own segment order, with its own gaps and optional
+    opening, and encoded to espresso-<name>.mp3."""
     if not scripts:
         raise ValueError('At least one bullet script is required for TTS')
+    if not cfg.audio_tracks:
+        raise ValueError('At least one audio track is required for TTS')
 
     instructions = instructions or {}
+    needed_parts = sorted(
+        {part for track in cfg.audio_tracks for part in track.segments})
     config = _tts_config(cfg)
     pool = client if isinstance(client, GeminiClientPool) else GeminiClientPool([client])
     scheduler = KeyScheduler(
         pool.clients, pool.labels, cfg.tts_models,
         rpm=TTS_RPM, window=TTS_WINDOW_SECONDS)
     workers = len(pool.clients) * TTS_RPM
-    # One synthesis task per unique segment; the original is rendered just once.
+    # One synthesis task per unique (bullet, referenced part).
     tasks = [
-        (index, part, instructions.get(part, '') + text)
+        (index, part, instructions.get(part, '') + getattr(script, part))
         for index, script in enumerate(scripts)
-        for part, text in (('original', script.original),
-                           ('vocab', script.vocab),
-                           ('translation', script.translation))
+        for part in needed_parts
     ]
 
     clips = {}
@@ -251,24 +254,31 @@ def synthesize_study_audio(cfg, client, message_id, scripts, opening_pcm=b'',
             if manifest:
                 manifest.record(f'bullet {index + 1} {part}', model, key, name)
             completed_parts[index] += 1
-            if completed_parts[index] == 3:
+            if completed_parts[index] == len(needed_parts):
                 completed_bullets += 1
                 logger.info(
                     _bullet_progress(completed_bullets, len(scripts)))
 
-    segment_silence = _silence(cfg.segment_gap_seconds)
-    bullet_silence = _silence(cfg.bullet_gap_seconds)
-    bullets = []
-    for index in range(len(scripts)):
-        # The cached per-segment PCMs stay as the model produced them; the
-        # pathological-pause compression applies only to what gets assembled.
-        original, vocab, translation = (
-            _compress_long_silences(clips[(index, part)])
-            for part in ('original', 'vocab', 'translation'))
-        segments = [original, vocab, original, translation, original]
-        # Segments within one bullet get the shorter gap.
-        bullets.append(segment_silence.join(segments))
-    # The opening already ends with its own pause, so it leads straight in;
-    # consecutive bullets are separated by the longer gap.
-    pcm = bytes(opening_pcm) + bullet_silence.join(bullets)
-    return _encode_mp3(cfg, message_id, pcm)
+    # The cached per-segment PCMs stay as the model produced them; the
+    # pathological-pause compression applies once per clip to what gets
+    # assembled, reused across every track that references it.
+    compressed = {key: _compress_long_silences(data)
+                  for key, data in clips.items()}
+
+    results = []
+    for track in cfg.audio_tracks:
+        segment_silence = _silence(track.segment_gap_seconds)
+        bullet_silence = _silence(track.bullet_gap_seconds)
+        bullets = [
+            segment_silence.join(
+                compressed[(index, part)] for part in track.segments)
+            for index in range(len(scripts))
+        ]
+        # The opening already ends with its own pause, so it leads straight in;
+        # consecutive bullets are separated by the longer gap.
+        opening = bytes(opening_pcm) if track.opening else b''
+        pcm = opening + bullet_silence.join(bullets)
+        path = _encode_mp3(
+            cfg, message_id, f'espresso-{track.name}.mp3', pcm)
+        results.append((track.name, path))
+    return results
