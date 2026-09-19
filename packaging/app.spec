@@ -8,9 +8,8 @@
 # The result is dist/<package name>. ffmpeg is deliberately not bundled: the
 # app invokes it from PATH and users install it themselves.
 #
-# The package-name literal below is retargeted by publish.sh, like the
-# APP_NAME fallback in config.py, so the same spec builds the public binary
-# under its own name.
+# APP_NAME below must match the package directory and the APP_NAME fallback in
+# config.py.
 
 import os
 import sys

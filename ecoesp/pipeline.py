@@ -11,7 +11,7 @@ import shutil
 
 from .config import ConfigError, load_auth_config, load_config
 from .storage.delivery_state import mark_processed, was_processed
-from .clients.gemini import make_gemini_client
+from .clients.gemini import GeminiLocationError, make_gemini_client
 from .clients.gmail_client import (
     GmailAuthenticationError,
     GmailDeliveryError,
@@ -108,8 +108,13 @@ def run(args):
 
     logger.info('Processing with Gemini (translating + annotating vocabulary)...')
     translation_prompt = load_prompt(cfg, 'text_translation.md')
-    processed = process_with_gemini(
-        cfg, client, subject, body, translation_prompt, manifest=manifest)
+    try:
+        processed = process_with_gemini(
+            cfg, client, subject, body, translation_prompt, manifest=manifest)
+    except GeminiLocationError as e:
+        logger.error('Gemini request failed: %s.', e)
+        logger.debug('Gemini location failure details', exc_info=True)
+        return 1
     atomic_write(
         message_cache_path(cfg, message_id, 'processed.md'), processed)
 

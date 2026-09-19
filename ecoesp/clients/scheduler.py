@@ -12,8 +12,9 @@ from one KeyScheduler:
   for the day. While an earlier model still has a live key, a worker waits for
   that key's per-minute budget instead of downgrading.
 - `mark_exhausted(key, model)` records an RPD hit so that (key, model) is never
-  handed out again this run; `penalize(key, model)` fills its minute window as
-  the rare RPM-429 safety net.
+  handed out again this run; `mark_unavailable(model)` does the same for a model
+  the API does not have at all, across every key; `penalize(key, model)` fills
+  its minute window as the rare RPM-429 safety net.
 
 Key/model selection lives here and only here, so usage is coordinated instead of
 cascading.
@@ -67,6 +68,21 @@ class KeyScheduler:
             pair = (self._models.index(model), key_index)
             first_report = pair not in self._exhausted
             self._exhausted.add(pair)
+            self._cond.notify_all()
+            return first_report
+
+    def mark_unavailable(self, model):
+        """Record that the API does not have this model (404 NOT_FOUND): never
+        hand it out again for the rest of the run, on any key. Unlike an RPD
+        exhaustion this is not per key — a model missing from the API version
+        is missing for all of them — so it retires the model in one call.
+        Return True only for the first report so concurrent workers can
+        suppress duplicate warnings atomically."""
+        with self._cond:
+            m = self._models.index(model)
+            pairs = {(m, k) for k in range(len(self._clients))}
+            first_report = not pairs <= self._exhausted
+            self._exhausted |= pairs
             self._cond.notify_all()
             return first_report
 

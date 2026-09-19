@@ -14,7 +14,8 @@ from google.genai import types
 
 from ..storage.files import atomic_write, message_cache_path
 from ..clients.gemini import (
-    GeminiClientPool, _is_daily_quota_error, _is_quota_error,
+    GeminiClientPool, PathologicalPauseError, _error_summary,
+    _is_daily_quota_error, _is_model_unavailable_error, _is_quota_error,
     _is_tts_retryable_error, _require_audio, generate_once)
 from ..clients.scheduler import KeyScheduler
 
@@ -55,31 +56,32 @@ def _bullet_progress(completed, total):
 # Samples whose absolute value stays below this count as silence; measured
 # well above Gemini TTS's noise floor and well below any speech.
 SILENCE_AMPLITUDE = 300
+# Silence is measured in fixed windows this many times per second.
+SILENCE_WINDOWS_PER_SECOND = 100
 # The longest pause allowed to survive inside one synthesized clip. The
 # longest legitimate pause observed is ~2s, so 3s only catches pathologies.
+# A clip past this line is resynthesized first (see _require_clean_audio);
+# compression only repairs what survives those retries.
 MAX_SILENCE_SECONDS = 3.0
 COMPRESSED_SILENCE_SECONDS = 1.0
 
 
-def _compress_long_silences(pcm):
-    """Cap pathological pauses inside one synthesized clip.
+def _silent_runs(pcm):
+    """Near-silent runs in one clip as (start byte, end byte, seconds).
 
-    The TTS models render style instructions like "pause noticeably between
-    entries" unpredictably; one observed clip held 9-10 seconds of dead air
-    between vocabulary entries. Any run of near-silence longer than
-    MAX_SILENCE_SECONDS is cut down to COMPRESSED_SILENCE_SECONDS, while
-    legitimate pauses pass through untouched. Scans in 10ms windows; input
-    shorter than one window (or not sample-aligned at the tail) is passed
-    through as-is."""
-    hop = PCM_BYTES_PER_SECOND // 2 // 100  # samples per 10ms window
+    Scans in fixed windows SILENCE_WINDOWS_PER_SECOND times a second; a window
+    counts as silent only when its loudest sample stays below
+    SILENCE_AMPLITUDE, so one stray click keeps the whole window awake. Input
+    shorter than one window (or not sample-aligned at the tail) yields no
+    runs."""
+    hop = PCM_BYTES_PER_SECOND // 2 // SILENCE_WINDOWS_PER_SECOND
     samples = array('h', pcm[:len(pcm) - (len(pcm) % 2)])
     windows = len(samples) // hop
-    max_run = int(MAX_SILENCE_SECONDS * 100)
     quiet = [
         max(abs(s) for s in samples[i * hop:(i + 1) * hop]) < SILENCE_AMPLITUDE
         for i in range(windows)
     ]
-    pieces, kept_to, i = [], 0, 0
+    runs, i = [], 0
     while i < windows:
         if not quiet[i]:
             i += 1
@@ -87,15 +89,51 @@ def _compress_long_silences(pcm):
         j = i
         while j < windows and quiet[j]:
             j += 1
-        if j - i >= max_run:
-            pieces.append(pcm[kept_to:i * hop * 2])
-            pieces.append(_silence(COMPRESSED_SILENCE_SECONDS))
-            kept_to = j * hop * 2
+        runs.append((i * hop * 2, j * hop * 2,
+                     (j - i) / SILENCE_WINDOWS_PER_SECOND))
         i = j
+    return runs
+
+
+def _compress_long_silences(pcm):
+    """Cap pathological pauses inside one synthesized clip.
+
+    The TTS models render style instructions like "pause noticeably between
+    entries" unpredictably; one observed clip held 9-10 seconds of dead air
+    between vocabulary entries. Such a clip is resynthesized rather than
+    patched, so this is the repair of last resort: it runs on whatever
+    survives that retry budget, keeping a stubborn clip usable instead of
+    failing the segment. Any run of near-silence reaching MAX_SILENCE_SECONDS
+    is cut down to COMPRESSED_SILENCE_SECONDS, while legitimate pauses pass
+    through untouched."""
+    pieces, kept_to = [], 0
+    for start, end, seconds in _silent_runs(pcm):
+        if seconds < MAX_SILENCE_SECONDS:
+            continue
+        pieces.append(pcm[kept_to:start])
+        pieces.append(_silence(COMPRESSED_SILENCE_SECONDS))
+        kept_to = end
     if not pieces:
         return pcm
     pieces.append(pcm[kept_to:])
     return b''.join(pieces)
+
+
+def _require_clean_audio(response):
+    """Extract PCM from a TTS response, rejecting clips that hold dead air.
+
+    A pause reaching MAX_SILENCE_SECONDS means the model mis-rendered the
+    script's pacing, not that the request failed, so it is raised as a
+    retryable payload error: the segment loop resynthesizes on a fresh
+    (key, model), which usually returns a clean take. The offending clip
+    travels on the exception so an exhausted retry budget can still fall back
+    to compressing it."""
+    data = _require_audio(response)
+    worst = max((seconds for _, _, seconds in _silent_runs(data)), default=0.0)
+    if worst >= MAX_SILENCE_SECONDS:
+        raise PathologicalPauseError(
+            f'TTS clip holds {worst:.1f}s of dead air', data)
+    return data
 
 
 def _tts_config(cfg):
@@ -146,10 +184,15 @@ def _synthesize_segment(scheduler, label, content, config):
     model and only downgrades once every key's primary is exhausted for the day.
     A per-day (RPD) 429 marks that (key, model) exhausted; a per-minute (RPM) 429
     penalizes its window; either way the segment retries on whatever the
-    scheduler hands out next. A 400 (the TTS model non-deterministically
-    rejecting content), 500, 503, network failure, or missing/malformed audio
-    payload retries up to three times with 2/4/8-second backoff, acquiring
-    scheduler budget again before every request; anything else fails the segment.
+    scheduler hands out next. A 404 retires the model itself across every key,
+    so the segment continues on the next model in the chain. A 400 (the TTS
+    model non-deterministically rejecting content), 500, 503, network failure,
+    missing/malformed audio payload, or a clip holding dead air past
+    MAX_SILENCE_SECONDS retries up to three times with 2/4/8-second backoff,
+    acquiring scheduler budget again before every request; anything else fails
+    the segment. A clip still full of dead air once those attempts run out is
+    returned anyway, for assembly to compress, since losing the segment would
+    cost the whole run its audio.
     Returns the PCM plus the model and API-key label that produced it."""
     logger.debug('Synthesizing %s...', label)
     transient_retries = 0
@@ -157,7 +200,8 @@ def _synthesize_segment(scheduler, label, content, config):
         index, sdk_client, key_label, model = scheduler.acquire()
         try:
             data = generate_once(
-                sdk_client, model, content, config, extract=_require_audio)
+                sdk_client, model, content, config,
+                extract=_require_clean_audio)
             logger.debug('%s ready with %s on %s.', label, model, key_label)
             return data, model, key_label
         except Exception as e:
@@ -178,6 +222,16 @@ def _synthesize_segment(scheduler, label, content, config):
                         label, key_label, model)
                     scheduler.penalize(index, model)
                 continue
+            if _is_model_unavailable_error(e):
+                if scheduler.mark_unavailable(model):
+                    logger.warning(
+                        '%s is not available (%s); retiring it for this run.',
+                        model, _error_summary(e))
+                else:
+                    logger.debug(
+                        '%s: %s is not available; already retired.',
+                        label, model)
+                continue
             if (_is_tts_retryable_error(e)
                     and transient_retries < TTS_TRANSIENT_RETRIES):
                 delay = 2 ** (transient_retries + 1)
@@ -188,6 +242,15 @@ def _synthesize_segment(scheduler, label, content, config):
                     TTS_TRANSIENT_RETRIES, delay, e)
                 time.sleep(delay)
                 continue
+            # Dead air is cosmetic, so it must never cost the run its audio:
+            # once resynthesis is out of attempts, keep the last clip and let
+            # assembly compress the pause.
+            if isinstance(e, PathologicalPauseError):
+                logger.warning(
+                    '%s still holds dead air after %s attempts (%s); keeping '
+                    'it and compressing the pause.',
+                    label, transient_retries + 1, e)
+                return e.pcm, model, key_label
             raise
 
 
@@ -259,9 +322,10 @@ def synthesize_study_audio(cfg, client, message_id, scripts, opening_pcm=b'',
                 logger.info(
                     _bullet_progress(completed_bullets, len(scripts)))
 
-    # The cached per-segment PCMs stay as the model produced them; the
-    # pathological-pause compression applies once per clip to what gets
-    # assembled, reused across every track that references it.
+    # The cached per-segment PCMs stay as the model produced them. Only a clip
+    # that kept its dead air through every resynthesis attempt still needs
+    # compressing; that runs once per clip here, reused across every track
+    # that references it.
     compressed = {key: _compress_long_silences(data)
                   for key, data in clips.items()}
 

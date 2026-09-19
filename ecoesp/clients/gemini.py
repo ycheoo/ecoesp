@@ -19,6 +19,23 @@ class ResponsePayloadError(ValueError):
     """The API succeeded but did not return the requested payload."""
 
 
+class PathologicalPauseError(ResponsePayloadError):
+    """A TTS clip arrived intact but holds an unacceptably long silent run.
+
+    Subclasses ResponsePayloadError so the segment retry path treats it like
+    any other bad payload. It carries the offending PCM so a caller whose
+    retry budget runs out can still repair this clip rather than lose the
+    segment, which would cost the whole run its audio."""
+
+    def __init__(self, message, pcm):
+        super().__init__(message)
+        self.pcm = pcm
+
+
+class GeminiLocationError(RuntimeError):
+    """The Gemini API rejected the request's network location."""
+
+
 class GeminiClientPool:
     """Gemini SDK clients in configured scheduling order.
 
@@ -81,13 +98,33 @@ def _is_retryable_error(e):
     return code == 408 or isinstance(code, int) and 500 <= code < 600
 
 
+def _is_model_unavailable_error(e):
+    """True when the chain's current model is not there to call: retired by
+    Google, misspelled, or not enabled for this API key's project. The API
+    answers a generate request for such a model with 404 NOT_FOUND."""
+    return (getattr(e, 'code', None) == 404
+            and getattr(e, 'status', None) == 'NOT_FOUND')
+
+
+def _raise_for_unsupported_location(error):
+    message = str(getattr(error, 'message', error)).lower()
+    if (getattr(error, 'code', None) == 400
+            and getattr(error, 'status', None) == 'FAILED_PRECONDITION'
+            and 'location' in message
+            and 'not supported' in message):
+        raise GeminiLocationError(
+            'the current network location is not supported by the Gemini API; '
+            'use a proxy or outbound route in a supported region and try again'
+        ) from error
+
+
 def _is_tts_retryable_error(e):
     """True for transient TTS failures worth a segment retry: empty/malformed
-    audio, connection/timeout, 500/503, and any 400 INVALID_ARGUMENT. The TTS
-    model rejects otherwise-valid content non-deterministically — sometimes
-    trying to emit text, sometimes a generic invalid-argument — and a retry
-    usually succeeds; the request shape itself is fixed, so a 400 is a content
-    hiccup, not a malformed request."""
+    audio, a clip holding pathological dead air, connection/timeout, 500/503,
+    and any 400 INVALID_ARGUMENT. The TTS model rejects otherwise-valid
+    content non-deterministically — sometimes trying to emit text, sometimes a
+    generic invalid-argument — and a retry usually succeeds; the request shape
+    itself is fixed, so a 400 is a content hiccup, not a malformed request."""
     if isinstance(e, ResponsePayloadError):
         return True
     if isinstance(e, (httpx.TransportError,
@@ -138,8 +175,12 @@ def generate_once(sdk_client, model, contents, config=None, extract=None):
     and moves on for a 429, and fails the segment for anything else. `extract`
     pulls the payload out of the response (e.g. _require_audio). Text generation
     uses gemini_generate's retry/fallback instead."""
-    response = sdk_client.models.generate_content(
-        model=model, contents=contents, config=config)
+    try:
+        response = sdk_client.models.generate_content(
+            model=model, contents=contents, config=config)
+    except Exception as e:
+        _raise_for_unsupported_location(e)
+        raise
     return extract(response) if extract else response
 
 
@@ -147,9 +188,11 @@ def gemini_generate(client, models, contents, config=None, start=0, extract=None
     """Generate content, walking the fallback chain `models` (a list, tried in
     order from index `start`). Transient errors retry the same model with
     backoff. A quota error (429) tries the same model with the next API key,
-    then steps to the next model only after all configured keys are exhausted. `extract`
-    (e.g. _require_text / _require_audio) pulls the payload out of the response
-    inside the retry loop, so empty/malformed responses are retried too.
+    then steps to the next model only after all configured keys are exhausted.
+    A model the API does not have (404) steps to the next model at once,
+    without retrying it or trying other keys. `extract` (e.g. _require_text /
+    _require_audio) pulls the payload out of the response inside the retry
+    loop, so empty/malformed responses are retried too.
     Returns (extracted_payload_or_response, index_of_model_used). Raises if the
     chain is exhausted."""
     pool = client if isinstance(client, GeminiClientPool) else GeminiClientPool([client])
@@ -159,6 +202,7 @@ def gemini_generate(client, models, contents, config=None, start=0, extract=None
     for i in range(start, len(models)):
         model = models[i]
         quota_exc = None
+        missing_exc = None
         transient_exhausted = False
         for key_index in range(pool.active_index, len(pool.clients)):
             sdk_client = pool.clients[key_index]
@@ -173,6 +217,10 @@ def gemini_generate(client, models, contents, config=None, start=0, extract=None
                     return response, i
                 except Exception as e:
                     last_exc = e
+                    _raise_for_unsupported_location(e)
+                    if _is_model_unavailable_error(e):
+                        missing_exc = e
+                        break
                     if _is_quota_error(e):
                         quota_exc = e
                         break
@@ -191,6 +239,8 @@ def gemini_generate(client, models, contents, config=None, start=0, extract=None
                         '%s transient error detail: %s', model, e)
                     time.sleep(wait)
 
+            if missing_exc is not None:
+                break
             if quota_exc is not None and key_index + 1 < len(pool.clients):
                 next_index = key_index + 1
                 logger.warning(
@@ -199,6 +249,17 @@ def gemini_generate(client, models, contents, config=None, start=0, extract=None
                     next_index + 1, len(pool.clients))
                 continue
             break
+
+        if missing_exc is not None:
+            if i + 1 < len(models):
+                logger.warning(
+                    '%s is not available (%s); falling back to %s.',
+                    model, _error_summary(missing_exc), models[i + 1])
+            else:
+                logger.warning(
+                    '%s is not available (%s); no fallback model remains.',
+                    model, _error_summary(missing_exc))
+            continue
 
         if transient_exhausted:
             if i + 1 < len(models):

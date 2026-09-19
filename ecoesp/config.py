@@ -21,17 +21,16 @@ SCOPES = [
 # these, so nothing here needs to be writable.
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'template')
 DEFAULT_TEXT_MODELS = [
+    'gemini-3.8-flash',
+    'gemini-3.7-flash',
     'gemini-3.6-flash',
-    'gemini-3.5-flash',
-    'gemini-3-flash-preview',
-    'gemini-2.5-flash',
 ]
 DEFAULT_TTS_MODELS = ['gemini-3.1-flash-tts-preview', 'gemini-2.5-flash-preview-tts']
 
 # The app's runtime identity (XDG directory leaf and env-var prefix) follows the
-# top-level package name. Renaming the package — as publish.sh does to produce
-# the public `ecoesp` fork — therefore gives it its own config/state/cache
-# namespace automatically, with no source edits.
+# top-level package name, so ~/.config/ecoesp, ECOESP_CONFIG_DIR, and their
+# state/cache/data siblings all come from here. The fallback matters only if
+# __package__ is somehow unavailable.
 APP_NAME = (__package__ or 'ecoesp').split('.')[0]
 
 # The spoken parts a track may arrange. 'original' and 'translation' come free
