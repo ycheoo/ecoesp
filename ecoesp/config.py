@@ -86,7 +86,6 @@ class Config:
     app_config_dir: str
     app_state_dir: str
     app_cache_dir: str
-    app_data_dir: str
     gemini_api_keys: tuple[str, ...]
     reader_email: str
     dest_email: str
@@ -313,14 +312,6 @@ def load_config():
         f'{APP_NAME.upper()}_CACHE_DIR',
         os.path.join(_xdg_dir('XDG_CACHE_HOME', '.cache'), APP_NAME),
     )
-    # User-supplied assets the app plays back rather than settings it reads —
-    # currently the optional opening jingle — so they belong in the XDG data
-    # directory, not alongside the .env in the config directory.
-    app_data_dir = os.environ.get(
-        f'{APP_NAME.upper()}_DATA_DIR',
-        os.path.join(_xdg_dir('XDG_DATA_HOME', '.local/share'), APP_NAME),
-    )
-
     errors = []
     gemini_api_keys = _gemini_api_keys(errors)
     reader_email = _email('READER_EMAIL', errors)
@@ -346,7 +337,7 @@ def load_config():
 
     # The config dir was already created above; the rest are only needed once
     # the config is valid and the run actually proceeds.
-    for directory in (app_state_dir, app_cache_dir, app_data_dir):
+    for directory in (app_state_dir, app_cache_dir):
         os.makedirs(directory, exist_ok=True)
 
     return Config(
@@ -354,7 +345,6 @@ def load_config():
         app_config_dir=app_config_dir,
         app_state_dir=app_state_dir,
         app_cache_dir=app_cache_dir,
-        app_data_dir=app_data_dir,
         gemini_api_keys=gemini_api_keys,
         reader_email=reader_email,
         dest_email=dest_email,

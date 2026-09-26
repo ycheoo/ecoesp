@@ -42,14 +42,55 @@ jobs:
       - name: Build the binary
         run: packaging/build.sh
 
+      # PyInstaller exits 0 whether or not the result actually runs, and
+      # the two ways this build can be wrong both show up only at startup:
+      # the hand-written googleapiclient hook can under-collect a
+      # dependency, and the glibc floor is inherited from whatever
+      # interpreter setup-python installed rather than chosen. Run the real
+      # artifact in a container that has no Python of its own and the
+      # oldest glibc the README claims support for, so neither reaches a
+      # user.
+      - name: Smoke-test the binary
+        run: |
+          docker run --rm -v "${PWD}/dist:/dist:ro" ubuntu:22.04 sh -eu -c '
+            if command -v python3 > /dev/null 2>&1; then
+              echo "this image now ships python3, so running here no longer" >&2
+              echo "proves the binary carries its own interpreter" >&2
+              exit 1
+            fi
+
+            /dist/ecoesp --version
+
+            # --version is answered by the argument parser, before the
+            # pipeline is imported, so on its own it would not notice a
+            # dependency the hook failed to collect. An empty config
+            # directory makes the app import everything and then stop at
+            # validation, which is exit 2 and this message.
+            set +e
+            XDG_CONFIG_HOME=/tmp/empty /dist/ecoesp --lookback-hours 1 > /tmp/probe 2>&1
+            status=$?
+            set -e
+            cat /tmp/probe
+            if [ "$status" -ne 2 ] || ! grep -q "^Configuration error:" /tmp/probe; then
+              echo "expected exit 2 and a configuration error, got exit $status" >&2
+              exit 1
+            fi
+          '
+
       - name: Pack the release archive
         if: github.ref_type == 'tag'
         # The archive name carries the version and platform; the binary inside
         # keeps its short name, which is what users type and point systemd at.
         # tar also preserves the executable bit, which a raw binary download
         # loses, so the unpacked file runs without a chmod.
+        #
+        # The same archive is attached a second time under a version-free
+        # name: the README's install block downloads through
+        # releases/latest/download/, which resolves the release but not the
+        # asset name, so it needs one that never changes between versions.
         run: |
           tar czf "dist/ecoesp_${GITHUB_REF_NAME}_linux_amd64.tar.gz" -C dist ecoesp
+          cp "dist/ecoesp_${GITHUB_REF_NAME}_linux_amd64.tar.gz" dist/ecoesp_linux_amd64.tar.gz
           rm dist/ecoesp
 
       - name: Publish the Release
@@ -60,7 +101,7 @@ jobs:
 
       - name: Upload the test build
         if: github.ref_type != 'tag'
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ecoesp-test-build
           path: dist/ecoesp

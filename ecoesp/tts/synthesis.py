@@ -164,12 +164,12 @@ def load_opening_pcm(cfg):
     """Read the optional preconverted 24kHz 16-bit mono opening PCM.
 
     Unlike the prompts and the email template there is no shipped default to fall
-    back to — the jingle is a personal file, so a user's own copy in the data
+    back to — the jingle is a personal file, so a user's own copy in the config
     directory is the only source. With no file there the audio simply starts at
     the first bullet, so returning empty bytes (rather than failing) lets the
     pipeline run out of the box without one.
     """
-    path = os.path.join(cfg.app_data_dir, 'opening.pcm')
+    path = os.path.join(cfg.app_config_dir, 'opening.pcm')
     if not os.path.isfile(path):
         logger.debug('No opening asset; starting at the first bullet.')
         return b''

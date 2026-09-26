@@ -22,7 +22,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="${ROOT}/build/venv"
 
-python3 -m venv "${VENV}"
+# --clear because `python3 -m venv` over an existing directory keeps the
+# scripts already in it: a venv left behind by an earlier checkout path
+# or an older interpreter survives, and its pip then dies on a bad
+# interpreter line. CI never sees this; a developer machine does.
+python3 -m venv --clear "${VENV}"
 "${VENV}/bin/pip" install --quiet --upgrade pip
 "${VENV}/bin/pip" install --quiet \
   -r "${ROOT}/requirements.txt" -r "${ROOT}/packaging/requirements.txt"

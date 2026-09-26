@@ -50,6 +50,14 @@ exe = EXE(
     a.datas,
     name=APP_NAME,
     console=True,
-    strip=False,
+    # The interpreter this is frozen against arrives with its debug symbols
+    # intact -- libpython alone is 30MB of the payload unstripped, a third of
+    # the released binary -- and nothing here is ever debugged through them.
+    # Stripping is the one PyInstaller setting that can produce a binary that
+    # builds cleanly and then fails to start, so the release workflow runs the
+    # result before publishing it.
+    strip=True,
+    # Not upx: it trades startup time for size on a binary that already
+    # unpacks itself on every run, and trips antivirus heuristics.
     upx=False,
 )
