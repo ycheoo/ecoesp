@@ -1,0 +1,4 @@
+# release templates 6
+a7ad8b1e493917e5a5c7bf452361240957e4044572e4966f6db0da64248931b1  .github/workflows/release.yml
+e7a69256910a05d7486226c755b869f11571d68dee293b2a3bb8b108e99daaf7  ci/job.sh
+66303d5dd6f177f747f9fe53d159145fdcd7c58b38bfecb29eeb11ce1c11017e  ci/publish.sh

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Run the frozen binary far enough to import everything the pipeline
+# imports at load time. ci/job.sh calls this as ci/hooks/smoke
+# dist/ecoesp, after the version probe.
+#
+# PyInstaller exits 0 whether or not what it produced can run, and a
+# module that analysis or the spec's excludes left out, or a native
+# extension that loads only there, fails only when the pipeline is
+# imported. --version is answered by the argument parser before that
+# import, so it would not notice. Against an empty config directory
+# the app imports the pipeline and stops at validation: exit 2 and a
+# line starting "Configuration error:". The message is checked too,
+# since the argument parser also exits 2 on a bad flag. Gmail's
+# discovery document is read only after validation, so the build
+# itself checks that it is bundled (packaging/hooks).
+set -euo pipefail
+
+bin="${1:?usage: ci/hooks/smoke BINARY}"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+status=0
+XDG_CONFIG_HOME="$tmp/config" "$bin" --lookback-hours 1 \
+    > "$tmp/probe" 2>&1 || status=$?
+cat "$tmp/probe"
+if [ "$status" -ne 2 ] || ! grep -q '^Configuration error:' "$tmp/probe"
+then
+    echo "ci/hooks/smoke: expected exit 2 and a configuration error," \
+        "got exit $status" >&2
+    exit 1
+fi

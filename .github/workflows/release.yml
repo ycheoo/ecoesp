@@ -1,0 +1,75 @@
+# Build, test and publish a release when a v* tag is pushed. A manual
+# run on a branch does everything but the publishing API call; a
+# manual run on a tag re-runs that tag, publishing included. The job
+# body is ci/job.sh and ci/publish.sh, which the rehearsal runs the
+# same way before anything reaches this file.
+#
+# Template file, listed with its checksum in ci/TEMPLATE: a change is
+# made in the templates' source and vendored again, never here.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      hold_on_failure:
+        description: Keep a failed job's container for later inspection (not on hosted runners)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # One file for both kinds of repo: a public repository builds on
+    # GitHub's runner, any other on the repository's own, in the same
+    # image, so the two cannot drift apart. Anything but an explicit
+    # "public" takes the repository's own.
+    runs-on: ${{ github.event.repository.visibility == 'public' && 'ubuntu-24.04' || fromJSON('["self-hosted", "linux", "x64"]') }}
+    # By digest: the runner pulls on every job, and a tag can move
+    # between two runs, so two jobs would build in different images.
+    # glibc 2.35 is every binary's floor.
+    container: ubuntu:22.04@sha256:0a9887931b0e38af2e3487ed39e29436b0535c4f3f52e57745baaf79d1898956
+    # A job that hangs past every in-script timeout is cut at 30
+    # minutes, not GitHub's 6 hours; a requested hold adds its own.
+    timeout-minutes: ${{ inputs.hold_on_failure && 90 || 30 }}
+    steps:
+      # The image has no git, so checkout downloads the commit's
+      # tarball through the API: no .git for anything to trip on, and
+      # no token left in the workspace.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - id: job
+        run: ci/job.sh
+
+      - if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ci/publish.sh
+
+      - if: github.ref_type != 'tag'
+        run: ci/publish.sh --dry-run
+
+      # Kept only when out/ was built and a later step failed: on
+      # success the release is the copy, and artifacts count against
+      # the account's storage. An artifact name is taken once per run
+      # and a re-run keeps the run id, hence the attempt.
+      - if: failure() && steps.job.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: out/
+          retention-days: 7
+
+      # For a failure only the real runner shows: the job container
+      # stays up so it can be entered from the machine running it,
+      # which a hosted runner gives no way to do (runs-on's own test).
+      # Cancelling the run ends the hold. The env file has no secrets:
+      # this step maps none.
+      - if: failure() && inputs.hold_on_failure && github.event.repository.visibility != 'public'
+        run: |
+          export -p | grep -E '^export (GITHUB|RUNNER)_' > "$RUNNER_TEMP/held-env"
+          echo "holding container ${{ job.container.id }} for 45 minutes"
+          sleep 2700

@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ecoesp — Economist Espresso Study Pack</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: Georgia, 'Times New Roman', serif;
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 48px 24px 64px;
+    background: #fafaf8;
+    color: #222;
+    line-height: 1.7;
+  }
+  h1 { font-size: 36px; margin: 0 0 4px; }
+  .tagline { margin: 0 0 36px; color: #555; font-size: 18px; }
+  h2 {
+    font-family: Arial, sans-serif;
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: #c00;
+    border-bottom: 2px solid #c00;
+    padding-bottom: 4px;
+    margin-top: 44px;
+  }
+  audio { width: 100%; margin: 8px 0 4px; }
+  .note { color: #555; font-size: 16px; }
+  img { max-width: 100%; height: auto; }
+  a { color: #c00; }
+  footer { margin-top: 48px; font-size: 15px; color: #555; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #14171c; color: #d6d3cd; }
+    .tagline, .note, footer { color: #a8a49d; }
+    h2 { color: #ff5a50; border-bottom-color: #ff5a50; }
+    a { color: #ff5a50; }
+  }
+</style>
+</head>
+<body>
+<h1>ecoesp</h1>
+<p class="tagline">The daily Economist Espresso, turned into a bilingual study pack: translated, annotated, and read aloud into your inbox.</p>
+
+<h2>Hear it</h2>
+<p class="note">One story from a real issue, in the default study rhythm: English original → vocabulary explanation → original again → Chinese translation → original once more.</p>
+<audio controls preload="none" src="media/sample-study.mp3"></audio>
+
+<h2>See it</h2>
+<p class="note">The same story as it arrives in the email.</p>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="media/sample-email-dark.png">
+  <img alt="One story of the study pack email: the English original, the Chinese translation, and annotated vocabulary" src="media/sample-email.png">
+</picture>
+
+<h2>Get it</h2>
+<p>Install and setup instructions live in the <a href="https://github.com/ycheoo/ecoesp">GitHub repository</a>. Bring a Gmail account that receives the Espresso newsletter and a free Gemini API key.</p>
+
+<footer>MIT licensed. Not affiliated with The Economist.</footer>
+</body>
+</html>

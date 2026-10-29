@@ -1,0 +1,12 @@
+# Required for httplib2 (the Gmail transport) to honor http(s)_proxy at all:
+# without it, its HTTPS path silently bypasses the proxy and connects direct.
+pysocks>=1.7.1
+google-auth>=2.0.0
+google-auth-oauthlib>=1.0.0
+google-auth-httplib2>=0.1.0
+google-api-python-client>=2.0.0
+google-genai>=1.0.0
+httpx>=0.28.0
+markdown>=3.5.0
+python-dotenv>=1.0.0
+requests>=2.28.0
